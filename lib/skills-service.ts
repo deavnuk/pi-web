@@ -3,8 +3,11 @@ import type { SkillInfo, SkillsResponse } from "@/lib/api-types";
 import { annotateSkillsWithInstallInfo } from "@/lib/skill-lock";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "@/lib/project-trust";
 
-export async function loadSkillsWithInstallInfo(cwd: string): Promise<SkillsResponse> {
-  const agentDir = getAgentDir();
+export async function loadSkillsWithInstallInfo(
+  cwd: string,
+  agentDirOverride?: string,
+): Promise<SkillsResponse> {
+  const agentDir = agentDirOverride ?? getAgentDir();
   const loader = new DefaultResourceLoader({ cwd, agentDir });
   await loader.reload(projectTrustReloadOptions(cwd, agentDir));
   const { skills, diagnostics } = loader.getSkills();

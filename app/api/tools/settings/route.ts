@@ -11,7 +11,9 @@ import {
   writeCodemodeMode,
   writeCodemodePreference,
 } from "@/lib/codemode-settings";
+import { join } from "node:path";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { requireAuth } from "@/lib/user-auth";
 import {
   readPowerShellToolEnabled,
   writePowerShellToolEnabled,
@@ -37,24 +39,35 @@ function errorResponse(error: unknown) {
   return refusal(500, "internal", error instanceof Error ? error.message : String(error));
 }
 
-async function readToolSettings(): Promise<ToolSettingsResponse> {
+// Multi-user: each account has its own settings.json in its agentDir, so these
+// choices (Code mode, PowerShell, default tools) are per-user rather than
+// installationside. They used to read and write the host `agentDir` for
+// everybody, so one user changed every other user's tool set.
+async function readToolSettings(agentDir: string): Promise<ToolSettingsResponse> {
+  const settingsPath = join(agentDir, "settings.json");
   // One after the other: each takes the file lock, and a reader that finds it
   // held backs off for about a second.
-  const powerShellEnabled = await readPowerShellToolEnabled();
-  const codemode = await readCodemodePreference();
-  const { mode: codemodeMode, inlineBudget: codemodeInlineBudget } = await readCodemodeSettings();
+  const powerShellEnabled = await readPowerShellToolEnabled(settingsPath);
+  const codemode = await readCodemodePreference(settingsPath);
+  const { mode: codemodeMode, inlineBudget: codemodeInlineBudget } = await readCodemodeSettings(settingsPath);
   return { isWindows: process.platform === "win32", powerShellEnabled, codemode, codemodeMode, codemodeInlineBudget };
 }
 
-export async function GET() {
+export async function GET(req: Request) {
+  // Reads the installation-wide tool settings, so it needs at least an account.
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
-    return NextResponse.json(await readToolSettings());
+    return NextResponse.json(await readToolSettings(auth.user.agentDir));
   } catch (error) {
     return errorResponse(error);
   }
 }
 
 export async function PUT(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const settingsPath = join(auth.user.agentDir, "settings.json");
   if (!isApiRequestAllowed(req)) {
     return refusal(403, "request-denied", "Untrusted API request");
   }
@@ -82,8 +95,8 @@ export async function PUT(req: Request) {
       return refusal(400, "invalid-request", "codemodeMode must be \"on\" or \"only\"");
     }
     try {
-      await writeCodemodeMode(changes.codemodeMode);
-      return NextResponse.json(await readToolSettings());
+      await writeCodemodeMode(changes.codemodeMode, settingsPath);
+      return NextResponse.json(await readToolSettings(auth.user.agentDir));
     } catch (error) {
       return errorResponse(error);
     }
@@ -96,8 +109,8 @@ export async function PUT(req: Request) {
       return refusal(400, "invalid-request", `codemodeInlineBudget must be a whole number from 0 to ${CODEMODE_INLINE_BUDGET_MAX}, or null`);
     }
     try {
-      await writeCodemodeInlineBudget(budget ?? undefined);
-      return NextResponse.json(await readToolSettings());
+      await writeCodemodeInlineBudget(budget ?? undefined, settingsPath);
+      return NextResponse.json(await readToolSettings(auth.user.agentDir));
     } catch (error) {
       return errorResponse(error);
     }
@@ -108,8 +121,8 @@ export async function PUT(req: Request) {
       return refusal(400, "invalid-request", "codemode must be \"automatic\" or \"always\"");
     }
     try {
-      await writeCodemodePreference(changes.codemode);
-      return NextResponse.json(await readToolSettings());
+      await writeCodemodePreference(changes.codemode, settingsPath);
+      return NextResponse.json(await readToolSettings(auth.user.agentDir));
     } catch (error) {
       return errorResponse(error);
     }
@@ -122,8 +135,8 @@ export async function PUT(req: Request) {
     return refusal(400, "invalid-request", "enabled must be a boolean");
   }
   try {
-    await writePowerShellToolEnabled(changes.enabled);
-    return NextResponse.json(await readToolSettings());
+    await writePowerShellToolEnabled(changes.enabled, settingsPath);
+    return NextResponse.json(await readToolSettings(auth.user.agentDir));
   } catch (error) {
     return errorResponse(error);
   }

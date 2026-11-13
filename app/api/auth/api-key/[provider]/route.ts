@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { removeStoredCredentialIfType, storeProviderCredential } from "@/lib/provider-credential-store";
 import { createModelRuntimeWithExtensions } from "@/lib/model-runtime";
+import { requireAuth } from "@/lib/user-auth";
+import { join } from "path";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +11,8 @@ type Params = { params: Promise<{ provider: string }> };
 
 // POST /api/auth/api-key/[provider]  body: { apiKey: string }
 export async function POST(req: Request, { params }: Params) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   const { provider } = await params;
   try {
     const { apiKey } = await req.json() as { apiKey?: string };
@@ -40,7 +44,8 @@ export async function POST(req: Request, { params }: Params) {
     // ModelRuntime.login() persists the credential and then performs an
     // unbounded network catalog refresh. Store the returned credential
     // directly so a slow catalog cannot leave the save request hanging.
-    await storeProviderCredential(provider, credential);
+    const authPath = auth.user ? join(auth.user.agentDir, "auth.json") : undefined;
+    await storeProviderCredential(provider, credential, authPath);
     invalidateModelsCache();
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -49,10 +54,13 @@ export async function POST(req: Request, { params }: Params) {
 }
 
 // DELETE /api/auth/api-key/[provider] — removes stored API key
-export async function DELETE(_req: Request, { params }: Params) {
+export async function DELETE(req: Request, { params }: Params) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   const { provider } = await params;
   try {
-    const removal = await removeStoredCredentialIfType(provider, "api_key");
+    const authPath = auth.user ? join(auth.user.agentDir, "auth.json") : undefined;
+    const removal = await removeStoredCredentialIfType(provider, "api_key", authPath);
     if (removal.status === "type_mismatch") {
       return NextResponse.json(
         { error: `${provider} is authenticated with OAuth, not an API key` },

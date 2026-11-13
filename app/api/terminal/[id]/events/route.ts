@@ -1,4 +1,5 @@
-import { hasTerminal, subscribeTerminal, type TerminalEvent } from "@/lib/terminal-manager";
+import { getTerminalUserId, hasTerminal, subscribeTerminal, type TerminalEvent } from "@/lib/terminal-manager";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -7,8 +8,13 @@ export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   const { id } = await params;
-  if (!hasTerminal(id)) return new Response("Terminal not found", { status: 404 });
+  // The stream carries raw shell output, so it is scoped to the owner too.
+  if (!hasTerminal(id) || getTerminalUserId(id) !== auth.user.userId) {
+    return new Response("Terminal not found", { status: 404 });
+  }
   const cursor = req.headers.get("last-event-id") ?? new URL(req.url).searchParams.get("after");
   const after = cursor !== null && /^\d+$/.test(cursor) && Number.isSafeInteger(Number(cursor))
     ? Number(cursor) : undefined;

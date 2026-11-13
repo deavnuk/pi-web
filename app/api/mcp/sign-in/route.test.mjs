@@ -8,6 +8,7 @@ import test, { after, beforeEach } from "node:test";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { createJiti } from "jiti";
 import { approveSignIn, startFakeOAuthServer } from "../../../../lib/__fixtures__/mcp-oauth-server.mjs";
+import { installTestUser } from "../../__tests__/test-user.mjs";
 
 // /api/mcp/sign-in connects and writes mcp-auth.json, so every case runs
 // against a PI_CODING_AGENT_DIR in a temporary folder and a fake OAuth server
@@ -23,13 +24,17 @@ await mkdir(agentDir, { recursive: true });
 await mkdir(join(cwd, ".pi"), { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
 const { clearMcpStatuses } = await jiti.import("../../../../lib/mcp-status.ts");
 const { cancelMcpSignIn, clearMcpSignIns, mcpSignInKey } = await jiti.import("../../../../lib/mcp-sign-in.ts");
 const { POST: START } = await jiti.import("./route.ts");
 const flowRoute = await jiti.import("./[flowId]/route.ts");
 const mcpRoute = await jiti.import("../route.ts");
-allowFileRoot(cwd);
+
+// Multi-user is the only mode: routes require a real account, and browsable
+// roots are registered per user.
+const { auth: testAuth, cleanup: cleanupTestUser, allowRoot } = await installTestUser();
+after(cleanupTestUser);
+allowRoot(cwd);
 
 const fake = await startFakeOAuthServer();
 
@@ -46,7 +51,7 @@ after(async () => {
 const globalPath = join(agentDir, "mcp.json");
 const projectPath = join(cwd, ".pi", "mcp.json");
 const authPath = join(agentDir, "mcp-auth.json");
-const marker = join(root, "command-ran");
+const marker = join(agentDir, "command-ran");
 const store = new ProjectTrustStore(agentDir);
 
 beforeEach(async () => {
@@ -73,7 +78,7 @@ beforeEach(async () => {
   store.set(cwd, null);
 });
 
-const json = { host: "localhost", "Content-Type": "application/json" };
+const json = { host: "localhost", authorization: testAuth, "Content-Type": "application/json" };
 
 async function answer(response) {
   return { status: response.status, body: await response.json() };
@@ -90,7 +95,7 @@ function start(body, headers = {}) {
 const context = (flowId) => ({ params: Promise.resolve({ flowId }) });
 
 function poll(flowId, headers = {}) {
-  return flowRoute.GET(new Request(`http://localhost/api/mcp/sign-in/${flowId}`, { headers: { host: "localhost", ...headers } }), context(flowId)).then(answer);
+  return flowRoute.GET(new Request(`http://localhost/api/mcp/sign-in/${flowId}`, { headers: { host: "localhost", authorization: testAuth, ...headers } }), context(flowId)).then(answer);
 }
 
 function paste(flowId, body, headers = {}) {
@@ -102,7 +107,7 @@ function paste(flowId, body, headers = {}) {
 }
 
 function cancel(flowId, headers = {}) {
-  return flowRoute.DELETE(new Request(`http://localhost/api/mcp/sign-in/${flowId}`, { method: "DELETE", headers: { host: "localhost", ...headers } }), context(flowId)).then(answer);
+  return flowRoute.DELETE(new Request(`http://localhost/api/mcp/sign-in/${flowId}`, { method: "DELETE", headers: { host: "localhost", authorization: testAuth, ...headers } }), context(flowId)).then(answer);
 }
 
 function action(body) {
@@ -110,7 +115,7 @@ function action(body) {
 }
 
 async function listed(query = "") {
-  const response = await mcpRoute.GET(new Request(`http://localhost/api/mcp${query}`, { headers: { host: "localhost" } }));
+  const response = await mcpRoute.GET(new Request(`http://localhost/api/mcp${query}`, { headers: { host: "localhost", authorization: testAuth } }));
   return (await response.json()).servers;
 }
 

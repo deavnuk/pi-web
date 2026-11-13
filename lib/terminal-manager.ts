@@ -2,6 +2,9 @@ import { randomUUID } from "crypto";
 import { homedir } from "os";
 import type { IPty } from "node-pty";
 import { samePath } from "./paths";
+import { wrapWithSandbox } from "./user-sandbox";
+import { writableRootsForUser } from "./user-sandbox-roots";
+import type { UserContext } from "./user-auth";
 
 export type TerminalEvent =
   | { type: "output"; data: string; offset: number; reset?: boolean }
@@ -13,6 +16,8 @@ type TerminalListener = (event: TerminalEvent) => void;
 interface TerminalRecord {
   pty: IPty;
   cwd: string;
+  /** The account that opened it; every later request must match. */
+  userId?: string;
   listeners: Set<TerminalListener>;
   backlog: string;
   offset: number;
@@ -61,6 +66,16 @@ function emit(record: TerminalRecord, event: TerminalEvent): void {
   for (const listener of record.listeners) listener(event);
 }
 
+/**
+ * Roots this terminal may read and write: the user's own data and the shared
+ * roots, plus the folder the shell starts in. A terminal started in a shared
+ * root gets that root twice — harmless, `buildSandboxArgs` de-duplicates.
+ */
+function shellWritableRoots(user: UserContext | null, cwd: string): string[] {
+  const roots = user ? writableRootsForUser(user) : [cwd];
+  return cwd ? [...roots, cwd] : roots;
+}
+
 function scheduleCleanup(id: string, record: TerminalRecord): void {
   if (record.cleanupTimer || record.listeners.size || registry().get(id) !== record) return;
   record.cleanupTimer = setTimeout(() => killTerminal(id), TERMINAL_RECONNECT_MS);
@@ -71,9 +86,19 @@ function dimension(value: number, fallback: number): number {
   return Math.min(1000, Math.max(2, Number.isFinite(value) ? Math.floor(value) : fallback));
 }
 
-export function createTerminal(cwd: string, cols: number, rows: number, id: string = randomUUID()): string {
+export function createTerminal(
+  cwd: string,
+  cols: number,
+  rows: number,
+  id: string = randomUUID(),
+  user: UserContext | null = null,
+): string {
   const existing = registry().get(id);
   if (existing) {
+    // Reusing a live id is a reconnect, so it is only for the account that
+    // opened it: two users can share an admin-configured root, and adopting
+    // another account's shell would hand over whatever it is running.
+    if (existing.userId !== user?.userId) throw new Error("Terminal belongs to a different session");
     if (!samePath(existing.cwd, cwd)) throw new Error("Terminal belongs to a different workspace");
     return id;
   }
@@ -95,8 +120,15 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
   const shell = process.platform === "win32"
     ? process.env.ComSpec ?? "cmd.exe"
     : process.env.SHELL || "/bin/sh";
-  const args = process.platform === "win32" ? [] : ["-l"];
-  const pty = spawn(shell, args, {
+  const shellArgs = process.platform === "win32" ? [] : ["-l"];
+  // The terminal runs the user's own commands, so it needs the same kernel-level
+  // boundary as the agent worker: otherwise it is an unrestricted shell that can
+  // read every other user's sessions and secrets. failClosed: a terminal that
+  // cannot be sandboxed must not start.
+  const sandboxed = wrapWithSandbox(shell, shellArgs, {
+    writableRoots: shellWritableRoots(user, cwd),
+  }, { failClosed: true });
+  const pty = spawn(sandboxed.command, sandboxed.args, {
     name: "xterm-256color",
     cols: dimension(cols, 80),
     rows: dimension(rows, 24),
@@ -106,6 +138,10 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
   const record: TerminalRecord = {
     pty,
     cwd,
+    // The owner: every later request for this id must come from the same
+    // account, or one user could type into another user's shell by guessing an
+    // id. The id is already a random UUID, so this is defence in depth.
+    userId: user?.userId,
     listeners: new Set(),
     backlog: "",
     offset: 0,
@@ -135,6 +171,11 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
 
 export function hasTerminal(id: string): boolean {
   return registry().has(id);
+}
+
+/** The account that opened this terminal, or undefined for a terminal it no longer owns. */
+export function getTerminalUserId(id: string): string | undefined {
+  return registry().get(id)?.userId;
 }
 
 export function getTerminalCwd(id: string): string | undefined {

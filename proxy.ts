@@ -13,7 +13,9 @@ import {
   isValidBasicAuthorization,
   isWebPasswordEnabled,
   PI_WEB_SESSION_COOKIE,
+  PI_WEB_AUTH_CHALLENGE,
 } from "@/lib/web-auth";
+import { verifyUserCredentialsSyncHint } from "@/lib/proxy-auth";
 
 function tooManyAttempts(retryAfterMs: number): NextResponse {
   return new NextResponse("Too many failed attempts", {
@@ -59,7 +61,17 @@ export function proxy(request: NextRequest) {
     const retryAfterMs = getAuthRetryAfterMs();
     if (retryAfterMs > 0) return tooManyAttempts(retryAfterMs);
     authenticated = isValidBasicAuthorization(authorization, password);
-    if (!authenticated) recordAuthFailure();
+    if (!authenticated) {
+      // Multi-user fallback: a valid users.json account also passes the proxy.
+      // (users.json lookup is async; the proxy does a sync fast-path via a
+      // pre-warmed snapshot — full verification still happens per-route in
+      // requireAuth(), so this is a UX gate, not the security boundary.)
+      if (verifyUserCredentialsSyncHint(authorization)) {
+        authenticated = true;
+      } else {
+        recordAuthFailure();
+      }
+    }
   }
   if (request.nextUrl.pathname === "/login") {
     return authenticated
@@ -80,7 +92,7 @@ export function proxy(request: NextRequest) {
       status: 401,
       headers: {
         "Cache-Control": "no-store",
-        "WWW-Authenticate": 'Basic realm="Pi Web", charset="UTF-8"',
+        "WWW-Authenticate": PI_WEB_AUTH_CHALLENGE,
       },
     });
   }

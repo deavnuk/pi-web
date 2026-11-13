@@ -1,4 +1,5 @@
 import { addSubscription, type PushSubscriptionRecord } from "@/lib/web-push";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -31,10 +32,19 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const locale = body.locale === "zh-CN" ? "zh-CN" : "en";
+  // Tag the subscription with its owner so completion pushes can be scoped to
+  // one user. Best-effort: in single-user mode resolveAuthUser returns null and
+  // the record stays unowned (delivery then falls back to notifying everyone).
+  // Multi-user is the only mode: a subscription must be attributable to an
+  // account, or no notification can be scoped to its owner.
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   await addSubscription({
     endpoint: body.subscription.endpoint,
     keys: body.subscription.keys,
     locale,
+    userId: user.userId,
   });
   return Response.json({ ok: true });
 }

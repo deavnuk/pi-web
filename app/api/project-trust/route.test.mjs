@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 // Real paths: trust.json keys folders by them, and the temp folder is a link on macOS.
 const root = realpathSync(await mkdtemp(join(tmpdir(), "pi-web-project-trust-route-")));
@@ -24,11 +25,15 @@ await mkdir(fresh, { recursive: true });
 await mkdir(outside, { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { SECRET_MASK } = await jiti.import("../../../lib/mcp-secrets.ts");
 const { GET, POST } = await jiti.import("./route.ts");
-allowFileRoot(cwd);
-allowFileRoot(fresh);
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser, allowRoot } = await installTestUser();
+after(cleanupTestUser);
+
+allowRoot(cwd);
+allowRoot(fresh);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -64,7 +69,7 @@ await writeFile(projectPath, projectConfig);
 
 async function get(path) {
   const query = path === undefined ? "" : `?cwd=${encodeURIComponent(path)}`;
-  const response = await GET(new Request(`http://localhost/api/project-trust${query}`, { headers: { host: "localhost" } }));
+  const response = await GET(new Request(`http://localhost/api/project-trust${query}`, { headers: { authorization: testAuth, host: "localhost" } }));
   return { status: response.status, body: await response.json() };
 }
 
@@ -112,7 +117,11 @@ test("an untrusted project's MCP servers are listed from the file, and nothing r
   }
   assert.equal(existsSync(marker), false, "the !command never ran");
   // No OAuth store was opened (it creates mcp-auth.json and a lock) and no trust decision was written.
-  assert.deepEqual((await readdir(agentDir)).sort(), ["mcp.json"]);
+  // An account's agentDir always carries its sessions/ and skills/ directories.
+  assert.deepEqual(
+    (await readdir(agentDir)).sort().filter((name) => name !== "sessions" && name !== "skills"),
+    ["mcp.json"],
+  );
 });
 
 test("the listing follows the file and its trust as they are now", async (t) => {
@@ -165,7 +174,7 @@ test("a cwd that is missing, not a folder, or outside the allowed folders is ref
 
   const response = await POST(new Request("http://localhost/api/project-trust", {
     method: "POST",
-    headers: { "Content-Type": "application/json", host: "localhost" },
+    headers: { authorization: testAuth, "Content-Type": "application/json", host: "localhost" },
     body: JSON.stringify({ cwd: outside }),
   }));
   assert.equal(response.status, 403);
@@ -205,7 +214,7 @@ test("a trust store locked by another process still lets the servers be listed",
 function post(body, headers = {}) {
   return POST(new Request("http://localhost/api/project-trust", {
     method: "POST",
-    headers: { "Content-Type": "application/json", host: "localhost", ...headers },
+    headers: { authorization: testAuth, "Content-Type": "application/json", host: "localhost", ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
   }));
 }

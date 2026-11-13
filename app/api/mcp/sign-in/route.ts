@@ -3,6 +3,7 @@ import type { McpErrorResponse, McpSignInFlowInfo } from "@/lib/api-types";
 import { isMcpDisabledByOperator } from "@/lib/builtin-extensions";
 import { isMcpEntryRefusal, mcpProjectTrustRefusal, readConnectableMcpEntry } from "@/lib/mcp-entry-request";
 import { createMcpSignInDeps, mcpOAuthUrl, startMcpSignIn } from "@/lib/mcp-sign-in";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,9 @@ function errorMessage(error: unknown): string {
 
 // POST /api/mcp/sign-in body: { scope, name, cwd? }
 export async function POST(req: Request) {
-  const entry = await readConnectableMcpEntry(req);
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const entry = await readConnectableMcpEntry(req, auth.user);
   if (isMcpEntryRefusal(entry)) return NextResponse.json(entry.body, { status: entry.status });
   const { scope, name, sourcePath, configKey, config, cwd, project, agentDir, internals } = entry;
   const url = mcpOAuthUrl(config);

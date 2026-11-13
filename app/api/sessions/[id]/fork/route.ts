@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { getRpcSession, isWorkerSessionProxy } from "@/lib/rpc-manager";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { forkSessionBranch, readForkSourceTitle, SessionForkError } from "@/lib/session-fork";
 import {
@@ -11,6 +11,8 @@ import {
   resolveSessionPath,
 } from "@/lib/session-reader";
 import type { SessionInfo } from "@/lib/types";
+import { ownsLiveSession } from "@/lib/session-ownership";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -34,13 +36,19 @@ function refusal(status: number, code: string, error: string) {
 
 // POST /api/sessions/[id]/fork - body {}; answers with the new session.
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  // A fork copies a transcript into a new file, so it must belong to the caller:
+  // resolving by id alone let any account copy another user's branch.
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   if (!isApiRequestAllowed(req)) return refusal(403, "request-denied", "Untrusted API request");
   if (!hasJsonContentType(req)) return refusal(415, "request-denied", "Content-Type must be application/json");
   const { id } = await params;
 
   try {
-    const opened = getRpcSession(id);
-    const sourcePath = (opened?.isAlive() ? opened.sessionFile : "") || await resolveSessionPath(id);
+    const live = getRpcSession(id);
+    const opened = live && ownsLiveSession(live, user) && !isWorkerSessionProxy(live) ? live : undefined;
+    const sourcePath = (opened?.isAlive() ? opened.sessionFile : "") || await resolveSessionPath(id, user.agentDir);
     if (!sourcePath) {
       invalidateSessionListCache();
       return refusal(404, "not_found", "Session not found");
@@ -54,13 +62,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // synchronously in this process, so the leaf read here and the file read
     // by forkSessionBranch() see the same entries. The leaf is the one
     // GET /api/sessions/[id] shows: the open wrapper's, else the file's.
+    // Worker proxies own no in-process SessionManager; liveLeafId stays
+    // undefined there and forkSessionBranch() forks from the file's end.
     const wrapper = getRpcSession(id);
-    let liveLeafId = wrapper?.isAlive() ? wrapper.inner.sessionManager.getLeafId() : undefined;
-    if (wrapper && liveLeafId !== undefined && !wrapper.isRunning()) {
+    const liveWrapper = wrapper && !isWorkerSessionProxy(wrapper) && wrapper.isAlive() ? wrapper : undefined;
+    let liveLeafId = liveWrapper ? liveWrapper.inner.sessionManager.getLeafId() : undefined;
+    if (liveWrapper && liveLeafId !== undefined && !liveWrapper.isRunning()) {
       // Another pi process appended to the file of an idle wrapper: a page
       // load (GET ?force=1) would drop the wrapper and show the file instead.
-      const diskLatest = readLatestSessionEntryId(wrapper.sessionFile);
-      if (diskLatest && !wrapper.inner.sessionManager.getEntry(diskLatest)) liveLeafId = undefined;
+      const diskLatest = readLatestSessionEntryId(liveWrapper.sessionFile);
+      if (diskLatest && !liveWrapper.inner.sessionManager.getEntry(diskLatest)) liveLeafId = undefined;
     }
     const fork = forkSessionBranch(sourcePath, liveLeafId, sourceTitle);
     cacheSessionPath(fork.sessionId, fork.path);

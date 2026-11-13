@@ -10,6 +10,7 @@ import {
 } from "@/lib/models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { requireAuth } from "@/lib/user-auth";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
 import { rememberProviderModels, withDeferredProviderModels } from "@/lib/deferred-provider-models";
 
@@ -26,14 +27,14 @@ function compareModelEntries(
     || modelNameCollator.compare(a.id, b.id);
 }
 
-async function loadModels(cwd: string): Promise<ModelsData> {
+async function loadModels(cwd: string, agentDirOverride?: string): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
   let modelList: { id: string; name: string; provider: string }[] = [];
   let defaultModel: { provider: string; modelId: string } | null = null;
   const thinkingLevels: Record<string, string[]> = {};
   const thinkingLevelMaps: Record<string, Record<string, string | null>> = {};
 
-  const agentDir = getAgentDir();
+  const agentDir = agentDirOverride ?? getAgentDir();
   // Gate untrusted project extensions: enumerating models still imports and
   // runs a repository's .pi/extensions factories, so honor project trust here
   // too (see lib/project-trust.ts, #236).
@@ -111,6 +112,10 @@ const EMPTY_MODELS: ModelsData = {
 };
 
 export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
+
   const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
   const cwd = resolve(requestedCwd);
 
@@ -123,13 +128,15 @@ export async function GET(req: Request) {
   if (!cwdStat.isDirectory()) {
     return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
   }
-  const allowedRoots = await getAllowedFileRoots();
+  const allowedRoots = await getAllowedFileRoots(user);
   if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
     return Response.json({ error: "Access denied" }, { status: 403 });
   }
 
   try {
-    return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
+    return Response.json(
+      await loadModelsWithCache(cwd, () => loadModels(cwd, user?.agentDir), user?.agentDir ?? ""),
+    );
   } catch {
     return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
   }

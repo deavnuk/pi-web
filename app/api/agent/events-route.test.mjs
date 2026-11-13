@@ -7,7 +7,7 @@ const agentEventStreamSource = await readFile(new URL("../../../lib/agent-event-
 
 test("agent SSE starts sessions asynchronously and disables response buffering", () => {
   assert.match(agentEventsSource, /createAgentEventStream\(req, id, sessionPromise\)/);
-  assert.match(agentEventsSource, /sessionPromise = startRpcSession\([\s\S]*?\.then\(\(result\) => result\.session\)/);
+  assert.match(agentEventsSource, /sessionPromise = startRpcSession\([\s\S]*?\.then\(\s*\(result\) => result\.session,?\s*\)/);
   assert.doesNotMatch(agentEventsSource, /await startRpcSession\(/);
   assert.match(agentEventsSource, /if \(req\.signal\.aborted\) return new Response\(null, \{ status: 204 \}\)/);
   assert.match(agentEventsSource, /"Cache-Control": "no-cache, no-transform"/);

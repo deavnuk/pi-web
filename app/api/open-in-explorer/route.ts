@@ -3,6 +3,7 @@ import { resolve } from "path";
 import { NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { isFileManagerSupported, isLoopbackHost, launchFileManager } from "@/lib/open-in-file-manager";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,6 +23,9 @@ export async function GET(request: Request) {
 
 /** Opens the session workspace in the OS file manager. */
 export async function POST(request: Request) {
+  const auth = await requireAuth(request);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   try {
     const { supported, reason } = availabilityFor(request);
     if (!supported) {
@@ -35,7 +39,7 @@ export async function POST(request: Request) {
     const target = resolve(body.cwd);
     // Authorize before touching the path, so a location outside the allowed
     // roots answers 403 whether or not it exists.
-    const roots = await getAllowedFileRoots();
+    const roots = await getAllowedFileRoots(user);
     if (!isExistingFilePathAllowed(target, roots)) {
       return NextResponse.json({ error: "access-denied" }, { status: 403 });
     }

@@ -6,10 +6,10 @@ import {
   isValidSessionId,
 } from "./session-file-references-core";
 
-export async function isFilePathReferencedBySession(filePath: string, sessionId: string | null): Promise<boolean> {
+export async function isFilePathReferencedBySession(filePath: string, sessionId: string | null, agentDir?: string): Promise<boolean> {
   if (!isValidSessionId(sessionId)) return false;
   try {
-    const sessionPath = await resolveSessionPath(sessionId);
+    const sessionPath = await resolveSessionPath(sessionId, agentDir);
     if (!sessionPath) return false;
     return isFilePathReferencedByEntries(filePath, getSessionEntries(sessionPath));
   } catch {
@@ -17,10 +17,10 @@ export async function isFilePathReferencedBySession(filePath: string, sessionId:
   }
 }
 
-export async function isBashOutputPathReferencedBySession(filePath: string, sessionId: string | null): Promise<boolean> {
+export async function isBashOutputPathReferencedBySession(filePath: string, sessionId: string | null, agentDir?: string): Promise<boolean> {
   if (!isValidSessionId(sessionId)) return false;
   try {
-    const sessionPath = await resolveSessionPath(sessionId);
+    const sessionPath = await resolveSessionPath(sessionId, agentDir);
     if (!sessionPath) return false;
     return isBashOutputPathReferencedByEntries(filePath, getSessionEntries(sessionPath));
   } catch {

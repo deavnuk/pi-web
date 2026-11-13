@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "pi-web-plugin-route-"));
 const agentDir = join(root, "agent");
@@ -15,9 +16,18 @@ await mkdir(cwd);
 await writeFile(join(agentDir, "extensions", "rtk.ts"), "export default () => {};\n");
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { GET, POST } = await jiti.import("./route.ts");
-allowFileRoot(cwd);
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser, allowRoot } = await installTestUser();
+after(cleanupTestUser);
+
+/** Headers for a route call: multi-user is the only mode, so every request authenticates. */
+function authHeaders(extra = {}) {
+  return { authorization: testAuth, ...extra };
+}
+
+allowRoot(cwd);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -26,7 +36,7 @@ after(async () => {
 });
 
 test("lists auto-discovered top-level extensions", async () => {
-  const response = await GET(new Request(`http://localhost/api/plugins?cwd=${encodeURIComponent(cwd)}`));
+  const response = await GET(new Request(`http://localhost/api/plugins?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() }));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -53,7 +63,7 @@ test("reports the package description from package.json", async () => {
   await writeFile(join(packageDir, "extensions", "index.ts"), "export default () => {};\n");
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ packages: [packageDir] }));
 
-  const response = await GET(new Request(`http://localhost/api/plugins?cwd=${encodeURIComponent(cwd)}`));
+  const response = await GET(new Request(`http://localhost/api/plugins?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() }));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -80,7 +90,7 @@ async function readPackages() {
 function postPlugins(body, projectCwd = cwd) {
   return POST(new Request("http://localhost/api/plugins", {
     method: "POST",
-    headers: { host: "localhost", "content-type": "application/json" },
+    headers: { authorization: testAuth, host: "localhost", "content-type": "application/json" },
     body: JSON.stringify({ cwd: projectCwd, ...body }),
   }));
 }
@@ -135,7 +145,7 @@ test("bulk toggles refuse an untrusted project's packages without stopping globa
   await mkdir(join(untrusted, ".pi"), { recursive: true });
   const projectSettings = JSON.stringify({ packages: ["npm:project-only"] });
   await writeFile(join(untrusted, ".pi", "settings.json"), projectSettings);
-  allowFileRoot(untrusted);
+  allowRoot(untrusted);
   await writeFile(settingsPath, JSON.stringify({ packages: [alpha] }));
 
   const response = await postPlugins({

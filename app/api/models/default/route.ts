@@ -1,6 +1,6 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import { createAgentSessionServices, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionServices } from "@earendil-works/pi-coding-agent";
 import {
   isThinkingLevel,
   projectSettingsPath,
@@ -13,6 +13,7 @@ import { resolveVisibleModels } from "@/lib/model-scope";
 import { withDeferredProviderModels } from "@/lib/deferred-provider-models";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,9 @@ function parseEdit(body: DefaultPreferencesRequest): DefaultPreferencesEdit | nu
  * so it goes through the same allow-list as `/api/models`.
  */
 export async function PUT(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   let body: DefaultPreferencesRequest;
   try {
     body = await req.json() as DefaultPreferencesRequest;
@@ -67,13 +71,15 @@ export async function PUT(req: Request) {
   if (!cwdStat.isDirectory()) {
     return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
   }
-  const allowedRoots = await getAllowedFileRoots();
+  const allowedRoots = await getAllowedFileRoots(user);
   if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
     return Response.json({ error: "Access denied" }, { status: 403 });
   }
 
   try {
-    const agentDir = getAgentDir();
+    // Multi-user: the default is saved into the requesting account's agentDir,
+    // never the host's.
+    const agentDir = user.agentDir;
     const trustReloadOptions = projectTrustReloadOptions(cwd, agentDir);
     const services = await createAgentSessionServices({
       cwd,

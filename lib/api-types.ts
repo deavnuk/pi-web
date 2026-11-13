@@ -90,6 +90,8 @@ export interface SkillInfo {
   filePath: string;
   baseDir: string;
   disableModelInvocation: boolean;
+  /** Set when the current user turned the skill off for themselves (FR-4.6). */
+  disabledByUser?: boolean;
   sourceInfo: {
     source?: string;
     scope?: string;
@@ -897,4 +899,69 @@ export interface PluginToggleResult {
 
 export interface PluginsBulkResponse extends PluginsResponse {
   results: PluginToggleResult[];
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled tasks (FR-7)
+// ---------------------------------------------------------------------------
+
+export type ScheduledTaskKind = "once" | "daily" | "weekly" | "monthly";
+
+export type ScheduledTaskRunStatus = "ok" | "error" | "skipped" | "timeout";
+
+export interface ScheduledTaskRun {
+  /** ISO instant the run started. */
+  at: string;
+  status: ScheduledTaskRunStatus;
+  /**
+   * Transcript of this execution. Each run is a fresh session, so this is the
+   * conversation the user can open to see what the task actually did.
+   */
+  sessionId?: string;
+  error?: string;
+}
+
+/**
+ * Structured schedule spec, passed through verbatim so the UI can render a
+ * localized description instead of showing the English `describe` string.
+ */
+export interface ScheduledTaskSchedule {
+  kind: ScheduledTaskKind;
+  /** "HH:MM" for the recurring kinds. */
+  time?: string;
+  /** 0 = Sunday … 6 = Saturday, for `weekly`. */
+  weekday?: number;
+  /** 1-31, for `monthly`. */
+  day?: number;
+  /** ISO instant, for `once`. */
+  at?: string;
+  timezone: string;
+}
+
+export interface ScheduledTaskView {
+  id: string;
+  title: string;
+  prompt: string;
+  schedule: ScheduledTaskSchedule;
+  /** English description; the UI prefers localizing `schedule` itself. */
+  describes: string;
+  cwd?: string;
+  enabled: boolean;
+  nextRunAt: string | null;
+  /** Newest first. */
+  runs: ScheduledTaskRun[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduledTasksResponse {
+  tasks: ScheduledTaskView[];
+  /** False in single-user mode, where there are no per-user schedules. */
+  perUser: boolean;
+  /** Upper bound the UI should enforce before letting the user add another. */
+  maxTasks: number;
+}
+
+export interface ScheduledTaskSingleResponse {
+  task: ScheduledTaskView;
 }

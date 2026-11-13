@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 const jiti = createJiti(import.meta.url, {
   alias: { "@": process.cwd() },
@@ -9,13 +10,23 @@ const jiti = createJiti(import.meta.url, {
 });
 const { GET, POST } = await jiti.import("./[id]/route.ts");
 
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
+
+/** Headers for a route call: multi-user is the only mode, so every request authenticates. */
+function authHeaders(extra = {}) {
+  return { authorization: testAuth, ...extra };
+}
+
 const id = "subagent-route-test";
 const context = { params: Promise.resolve({ id }) };
 
 function request(body) {
   return new Request(`http://localhost/api/subagents/${id}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { authorization: testAuth, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
@@ -69,7 +80,7 @@ function installRunningSubagent(t) {
 test("subagent route reads live state and accepts steer and abort actions", async (t) => {
   const state = installRunningSubagent(t);
 
-  const getResponse = await GET(new Request(`http://localhost/api/subagents/${id}`), context);
+  const getResponse = await GET(new Request(`http://localhost/api/subagents/${id}`, { headers: authHeaders() }), context);
   const getBody = await getResponse.json();
   assert.equal(getResponse.status, 200);
   assert.equal(getBody.run.status, "running");
@@ -110,7 +121,7 @@ test("subagent GET returns 404 for an unknown session", async (t) => {
 
   const missingId = `missing-subagent-${Date.now()}`;
   const response = await GET(
-    new Request(`http://localhost/api/subagents/${missingId}`),
+    new Request(`http://localhost/api/subagents/${missingId}`, { headers: authHeaders() }),
     { params: Promise.resolve({ id: missingId }) },
   );
   assert.equal(response.status, 404);

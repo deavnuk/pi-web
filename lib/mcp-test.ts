@@ -23,6 +23,7 @@ import type {
   PiSdkInternals,
   StdioTransport,
 } from "./pi-sdk-internals";
+import type { UserContext } from "./user-auth";
 
 // Settings › MCP's Test (ADR 0006): connect one `mcp.json` entry once, outside
 // any session, list what it offers, and close it again. It connects the way a
@@ -111,6 +112,11 @@ export type McpTestConnect = (target: McpTestTarget, signal: AbortSignal) => Pro
 export interface McpTestOptions {
   /** The caller's request; a test that every caller gave up on is stopped and not recorded. */
   signal?: AbortSignal;
+  /**
+   * The account the server runs for. Settings › MCP runs in the main process, so
+   * a stdio server it starts must be put inside that account's sandbox.
+   */
+  user?: UserContext | null;
   deadlineMs?: number;
   requestTimeoutMs?: number;
   closeWaitMs?: number;
@@ -357,6 +363,11 @@ export function openTestConnection(
     credentials?: McpOAuthCredentialStore;
     /** A pi provider's current token, for an entry with `auth.provider`; read from pi's credentials when omitted. */
     providerToken?: (provider: string) => Promise<string | undefined>;
+    /**
+     * The account the server runs for. A main-process caller passes it so the
+     * stdio server is sandboxed; an already-sandboxed caller leaves it unset.
+     */
+    user?: UserContext | null;
   } = {},
 ): McpTestConnection {
   const requestTimeoutMs = options.requestTimeoutMs ?? MCP_TEST_REQUEST_TIMEOUT_MS;
@@ -364,7 +375,14 @@ export function openTestConnection(
   const timeout = Math.min(config.timeout ?? SDK_DEFAULT_TIMEOUT_SECONDS, requestTimeoutMs / 1000);
   const entry: McpServerEntry = { name: target.name, config: { ...config, timeout }, source: target.sourcePath, scope: target.scope };
   const transports: McpTransport[] = [];
-  const factory = createPiWebMcpTransportFactory(internals);
+  const factory = createPiWebMcpTransportFactory(
+    internals,
+    options.user
+      // The project folder is the only extra root a Test needs; `target.cwd` is
+      // the home directory for a global entry, which must stay masked.
+      ? { user: options.user, ...(target.scope === "project" ? { writableRoots: [target.cwd] } : {}) }
+      : {},
+  );
   const connection = new internals.McpServerConnection({
     entry,
     cwd: target.cwd,
@@ -495,11 +513,12 @@ export async function connectForTest(
   target: McpTestTarget,
   internals: McpTestInternals,
   signal: AbortSignal,
-  options: { requestTimeoutMs?: number; closeWaitMs?: number; guard?: McpSignInWriteGuard } = {},
+  options: { requestTimeoutMs?: number; closeWaitMs?: number; guard?: McpSignInWriteGuard; user?: UserContext | null } = {},
 ): Promise<McpTestRun> {
   const opened = openTestConnection(target, internals, {
     ...(options.requestTimeoutMs !== undefined ? { requestTimeoutMs: options.requestTimeoutMs } : {}),
     ...(options.guard ? { credentials: guardedCredentialStore(internals, options.guard) } : {}),
+    ...(options.user ? { user: options.user } : {}),
   });
   // Whatever happens, the connection and its transports are closed: a result
   // that could not be built must not leave a stdio server running.
@@ -620,7 +639,12 @@ function startTest(
   // Taken when the test starts: a sign-out from then on bars its token writes and its record.
   const guard = signOutGuardFor(target);
   const connect: McpTestConnect = options.connect
-    ?? ((entry, signal) => connectForTest(entry, internals, signal, { requestTimeoutMs: options.requestTimeoutMs, closeWaitMs, guard }));
+    ?? ((entry, signal) => connectForTest(entry, internals, signal, {
+      requestTimeoutMs: options.requestTimeoutMs,
+      closeWaitMs,
+      guard,
+      ...(options.user ? { user: options.user } : {}),
+    }));
   const signedOutSince = (): boolean => {
     try {
       guard?.();

@@ -251,8 +251,13 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
   return scanned ? (await buildSessionList([scanned]))[0] ?? null : null;
 }
 
-async function loadAllSessions(): Promise<SessionInfo[]> {
-  return buildSessionList(await listSessionsIncremental());
+/**
+ * Scan a user agentDir's sessions tree. The shared scanner enumerates the
+ * per-cwd subdirectories itself; pass the user's agent dir so only their own
+ * session files are scanned. Falls back to the global agent dir when omitted.
+ */
+async function loadAllSessions(agentDir?: string): Promise<SessionInfo[]> {
+  return buildSessionList(await listSessionsIncremental(agentDir ? { agentDir } : {}));
 }
 
 /**
@@ -260,19 +265,22 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
  * header/stat metadata; a normal listAllSessions() call hydrates the exact
  * counts, names, and first messages afterwards.
  */
-export async function listSessionSummaries(): Promise<SessionInfo[]> {
-  return buildSessionList(await listSessionsIncremental({ deferDetails: true }));
+export async function listSessionSummaries(options: { agentDir?: string } = {}): Promise<SessionInfo[]> {
+  return buildSessionList(await listSessionsIncremental({ deferDetails: true, agentDir: options.agentDir }));
 }
 
-export async function listAllSessions(options: { force?: boolean; allowStale?: boolean } = {}): Promise<SessionInfo[]> {
-  if (options.force) invalidateSessionListCache();
+export async function listAllSessions(
+  options: { force?: boolean; allowStale?: boolean; agentDir?: string } = {},
+): Promise<SessionInfo[]> {
+  const agentDir = options.agentDir;
+  if (options.force) invalidateSessionListCache(agentDir);
   const generation = globalThis.__piSessionListGeneration ?? 0;
 
-  // Return cached result if still fresh (avoids re-scanning session files
-  // and re-spawning git processes on every page load).
-  const cache = globalThis.__piSessionListCache;
-  if (cache && cache.generation === generation && Date.now() - cache.ts < SESSION_LIST_CACHE_TTL_MS) {
-    return cache.data;
+  // Multi-user scans are cached per agentDir; single-user keeps the legacy
+  // global cache entry for identical behavior.
+  const cacheEntry = agentDir ? cacheByDir().get(agentDir) : globalThis.__piSessionListCache;
+  if (cacheEntry && Date.now() - cacheEntry.ts < SESSION_LIST_CACHE_TTL_MS) {
+    return cacheEntry.data;
   }
 
   // Callers that only need session metadata — mapping search hits onto sidebar
@@ -280,37 +288,54 @@ export async function listAllSessions(options: { force?: boolean; allowStale?: b
   // the background. A rebuild costs hundreds of milliseconds because it re-reads
   // every forked and subagent session, and it is triggered by ordinary agent
   // activity rather than by anything the caller did.
-  if (options.allowStale && cache) {
-    void listAllSessions().catch(() => undefined);
-    return cache.data;
+  if (options.allowStale && cacheEntry) {
+    void listAllSessions(options).catch(() => undefined);
+    return cacheEntry.data;
   }
 
-  // Coalescing dedup: concurrent callers share the same in-flight promise
-  // only while it belongs to the current cache generation.
-  if (globalThis.__piSessionListPromise && globalThis.__piSessionListPromiseGeneration === generation) {
-    return globalThis.__piSessionListPromise;
+  // Coalescing dedup: concurrent callers share the same in-flight promise.
+  const inflightKey = agentDir ?? "";
+  const inflight = cacheByDirInflight().get(inflightKey);
+  if (inflight) {
+    return inflight.promise;
   }
 
-  const loadPromise = loadAllSessions().then((data) => {
+  const loadPromise = loadAllSessions(agentDir).then((data) => {
     // If a mutation invalidated this scan, make this caller join (or start) a
     // scan for the current generation. Returning the stale result here made a
     // refresh race indistinguishable from a successful refresh.
-    if ((globalThis.__piSessionListGeneration ?? 0) !== generation) {
-      return listAllSessions();
+    if ((globalThis.__piSessionListGeneration ?? 0) !== generation && !agentDir) {
+      return listAllSessions(options);
     }
-    globalThis.__piSessionListCache = { data, ts: Date.now(), generation };
+    if (agentDir) {
+      cacheByDir().set(agentDir, { data, ts: Date.now() });
+    } else {
+      globalThis.__piSessionListCache = { data, ts: Date.now(), generation };
+    }
     return data;
   });
   const trackedPromise = loadPromise.finally(() => {
-    if (globalThis.__piSessionListPromise === trackedPromise) {
-      globalThis.__piSessionListPromise = undefined;
-      globalThis.__piSessionListPromiseGeneration = undefined;
-    }
+    const entry = cacheByDirInflight().get(inflightKey);
+    if (entry?.promise === trackedPromise) cacheByDirInflight().delete(inflightKey);
   });
 
-  globalThis.__piSessionListPromise = trackedPromise;
-  globalThis.__piSessionListPromiseGeneration = generation;
+  cacheByDirInflight().set(inflightKey, { promise: trackedPromise });
   return trackedPromise;
+}
+
+declare global {
+  var __piSessionListCacheByDir: Map<string, { data: SessionInfo[]; ts: number }> | undefined;
+  var __piSessionListInflightByDir: Map<string, { promise: Promise<SessionInfo[]> }> | undefined;
+}
+
+function cacheByDir(): Map<string, { data: SessionInfo[]; ts: number }> {
+  if (!globalThis.__piSessionListCacheByDir) globalThis.__piSessionListCacheByDir = new Map();
+  return globalThis.__piSessionListCacheByDir;
+}
+
+function cacheByDirInflight(): Map<string, { promise: Promise<SessionInfo[]> }> {
+  if (!globalThis.__piSessionListInflightByDir) globalThis.__piSessionListInflightByDir = new Map();
+  return globalThis.__piSessionListInflightByDir;
 }
 
 // ============================================================================
@@ -328,8 +353,8 @@ declare global {
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
-function defaultSessionsDir(): string {
-  return join(getAgentDir(), "sessions");
+function defaultSessionsDir(agentDir?: string): string {
+  return join(agentDir ?? getAgentDir(), "sessions");
 }
 
 function resolvePathWithinDefaultSessions(
@@ -346,13 +371,13 @@ function resolvePathWithinDefaultSessions(
     : null;
 }
 
-async function findSessionPathById(sessionId: string): Promise<string | null> {
+async function findSessionPathById(sessionId: string, agentDir?: string): Promise<string | null> {
   // The filename is only a candidate hint; the bounded header check remains
   // authoritative so future layouts and malformed files use the full fallback.
   if (!SESSION_ID_PATTERN.test(sessionId)) return null;
 
   let projectDirs: Dirent[];
-  const sessionsDir = resolvePath(defaultSessionsDir());
+  const sessionsDir = resolvePath(defaultSessionsDir(agentDir));
   try {
     projectDirs = await readdir(sessionsDir, { withFileTypes: true });
   } catch {
@@ -412,8 +437,16 @@ function findSessionIdByPath(filePath: string): string | undefined {
   }
 }
 
-export function invalidateSessionListCache(): void {
+export function invalidateSessionListCache(agentDir?: string): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
+  if (agentDir) {
+    cacheByDir().delete(agentDir);
+  } else {
+    cacheByDir().clear();
+    // Single-user callers cache in the legacy global slot; a bare invalidate
+    // must clear it too, or force refreshes keep serving the stale scan.
+    globalThis.__piSessionListCache = undefined;
+  }
   // The previous scan is kept, not discarded: it is no longer fresh, but it is
   // still a complete catalogue apart from sessions created moments ago. Callers
   // that pass `allowStale` read it instead of paying for a rebuild.
@@ -553,23 +586,34 @@ export function openSessionManager(
   return sm;
 }
 
-export async function resolveSessionPath(sessionId: string): Promise<string | null> {
+export async function resolveSessionPath(sessionId: string, agentDir?: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
-  if (cached) return cached;
+  if (cached && (!agentDir || isPathUnderSessionsRoot(cached, agentDir))) return cached;
 
-  const targetedPath = await findSessionPathById(sessionId);
+  const targetedPath = await findSessionPathById(sessionId, agentDir);
   if (targetedPath) {
+    // In multi-user mode only return paths within the requesting agentDir.
+    if (agentDir && !isPathUnderSessionsRoot(targetedPath, agentDir)) return null;
     cacheSessionPath(sessionId, targetedPath);
     return getPathCache().get(sessionId) ?? null;
   }
 
   // Unknown layouts, malformed candidates, and duplicate IDs retain the
   // existing authoritative catalogue scan instead of negative-caching a miss.
-  await listAllSessions();
-  return getPathCache().get(sessionId) ?? null;
+  await listAllSessions(agentDir ? { agentDir } : {});
+  const afterScan = getPathCache().get(sessionId);
+  if (agentDir && afterScan && !isPathUnderSessionsRoot(afterScan, agentDir)) return null;
+  return afterScan ?? null;
 }
 
-export async function resolveSessionIdByPath(filePath: string): Promise<string | undefined> {
+function isPathUnderSessionsRoot(filePath: string, agentDir: string): boolean {
+  const sessionsRoot = resolvePath(defaultSessionsDir(agentDir));
+  const candidate = resolvePath(filePath);
+  const rel = relative(sessionsRoot, candidate);
+  return rel !== "" && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+export async function resolveSessionIdByPath(filePath: string, agentDir?: string): Promise<string | undefined> {
   const pathKey = sessionPathKey(filePath);
   const cached = getPathToIdCache().get(pathKey);
   if (cached) return cached;
@@ -577,7 +621,7 @@ export async function resolveSessionIdByPath(filePath: string): Promise<string |
   const targetedId = findSessionIdByPath(filePath);
   if (targetedId) return targetedId;
 
-  await listAllSessions();
+  await listAllSessions(agentDir ? { agentDir } : {});
   return getPathToIdCache().get(pathKey);
 }
 

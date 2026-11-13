@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession, setRpcSessionTools } from "@/lib/rpc-manager";
+import { ownsLiveSession } from "@/lib/session-ownership";
+import { requireAuth } from "@/lib/user-auth";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -8,6 +10,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   let commandType: string | undefined;
   let promptAccepted = false;
 
@@ -23,14 +28,17 @@ export async function POST(
     }
     const toolNames = requestedToolNames as string[] | undefined;
 
-    // Fast path: already-running session
-    const existing = getRpcSession(id);
+    // Fast path: already-running session. Only the account that owns it may
+    // send into it: the registry is process-wide, so a bare `getRpcSession(id)`
+    // let any caller drive another user's running agent (including prompts).
+    const live = getRpcSession(id);
+    const existing = live && ownsLiveSession(live, user) ? live : undefined;
     if (body.type === "set_tools") {
-      const filePath = existing?.sessionFile || await resolveSessionPath(id) || undefined;
+      const filePath = existing?.sessionFile || await resolveSessionPath(id, user?.agentDir) || undefined;
       if (!existing?.isAlive() && !filePath) {
         return NextResponse.json({ error: "Session not found" }, { status: 404 });
       }
-      const changed = await setRpcSessionTools(id, filePath, toolNames);
+      const changed = await setRpcSessionTools(id, filePath, toolNames, user ?? undefined);
       return NextResponse.json({
         success: true,
         data: { sessionId: changed.sessionId, recreated: changed.recreated },
@@ -42,7 +50,7 @@ export async function POST(
       return NextResponse.json({ success: true, data: result });
     }
 
-    const filePath = await resolveSessionPath(id);
+    const filePath = await resolveSessionPath(id, user?.agentDir);
     if (!filePath) {
       return NextResponse.json({
         error: "Session not found",
@@ -53,6 +61,7 @@ export async function POST(
     }
 
     const { session } = await startRpcSession(id, filePath, undefined, {
+      ...(user ? { user } : {}),
       ...(toolNames !== undefined ? { toolNames } : {}),
     });
     const result = await session.send(body);

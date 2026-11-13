@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { statSync, type Stats } from "fs";
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
-import { allowFileRoot } from "@/lib/file-access";
+import { allowFileRootForUser } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
+import { requireAuth } from "@/lib/user-auth";
+import { isApiRequestAllowed } from "@/lib/request-security";
 import { resolveProject } from "@/lib/worktree";
 
 function normalizeCwd(cwd: string): string {
@@ -14,7 +16,22 @@ function normalizeCwd(cwd: string): string {
 
 // POST /api/cwd/validate  body: { cwd: string }
 // Validates a candidate workspace before the UI selects it.
+//
+// Multi-user: authentication is required and the directory is registered as
+// browsable FOR THIS USER ONLY. It used to call the process-wide
+// allowFileRoot(), so one user validating a path made it browsable for everyone
+// until the next restart.
 export async function POST(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
+  if (!user) {
+    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  }
+  if (!isApiRequestAllowed(req)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  }
+
   try {
     const body = await req.json() as { cwd?: unknown };
     const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
@@ -35,7 +52,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Path is not a directory: ${cwd}` }, { status: 400 });
     }
 
-    allowFileRoot(normalizedCwd);
+    allowFileRootForUser(user.userId, normalizedCwd);
     const project = await resolveProject(normalizedCwd);
     return NextResponse.json({
       success: true,

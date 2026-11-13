@@ -3,6 +3,8 @@ import type { McpConfigFieldRef } from "./api-types";
 import { findWebPasswordField, resolvedConfigValues, WEB_PASSWORD_VARIABLE, type McpResolvedConfigValue } from "./mcp-config-values";
 import type { PiSdkInternals } from "./pi-sdk-internals";
 import { sanitizeProjectCommandEnvironment } from "./project-command-env";
+import { sandboxCommandForUser } from "./user-sandbox-roots";
+import type { UserContext } from "./user-auth";
 
 // The resolved-value walk and the PI_WEB_PASSWORD rule are client-safe (`lib/mcp-config-values.ts`).
 export { findWebPasswordField, resolvedConfigValues, WEB_PASSWORD_VARIABLE, type McpResolvedConfigValue };
@@ -22,6 +24,22 @@ type ConfigValueInternals = Pick<PiSdkInternals, "getConfigValueEnvVarNames" | "
 export interface PiWebMcpTransportOptions {
   /** Environment stdio servers start from, before sanitizing. Defaults to `process.env` at connect time. */
   baseEnvironment?: NodeJS.ProcessEnv;
+  /**
+   * Run a stdio server inside this account's sandbox.
+   *
+   * Set by callers that start a server from the main process (Settings › MCP's
+   * Test and sign-in). Inside a user's worker the process is already sandboxed,
+   * so those callers leave it unset and the server inherits that boundary.
+   */
+  user?: UserContext | null;
+  /**
+   * Extra folders the server legitimately needs, beyond the account's own roots.
+   *
+   * A caller passes the project folder it is connecting for. The server's `cwd`
+   * is deliberately not added here by default: for a global server it is the
+   * home directory, and mounting that would undo the sandbox's home mask.
+   */
+  writableRoots?: Iterable<string>;
   platform?: NodeJS.Platform;
 }
 
@@ -92,8 +110,22 @@ export function createPiWebMcpTransportFactory(
     if (unexpected !== undefined) {
       throw new Error(`MCP server "${entry.name}": the SDK set environment variable ${unexpected}, which its config does not declare`);
     }
+    // A stdio server is a process the user chose to run. Started from the main
+    // process it would see every user's files, so it runs in that user's
+    // sandbox (sandbox-design.md S5); the folder it starts in is mounted too.
+    //
+    // `cwd` is NOT automatically a root: a global server with no project
+    // starts in the home directory, and mounting that would bind the host home
+    // straight back over the sandbox's tmpfs — the one thing the mask exists to
+    // prevent. It is mounted only when the caller names it as a writable root
+    // (a project folder the user already has access to).
+    const launched = options.user
+      ? sandboxCommandForUser(options.user, stdioOptions.command, [...(stdioOptions.args ?? [])], options.writableRoots ?? [])
+      : { command: stdioOptions.command, args: [...(stdioOptions.args ?? [])] };
     return new internals.StdioTransport({
       ...stdioOptions,
+      command: launched.command,
+      args: launched.args,
       env: serverEnvironment(options.baseEnvironment ?? process.env, configured, platform),
       inheritEnv: false,
     });

@@ -10,6 +10,7 @@ import {
   type ResolvedResource,
 } from "@earendil-works/pi-coding-agent";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { requireAuth } from "@/lib/user-auth";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getProjectTrustStatus } from "@/lib/project-trust";
 import { isPluginSourceCheckable } from "@/lib/plugin-updates";
@@ -321,8 +322,8 @@ function collectResources(paths: ResolvedPaths): {
   return { countsByPackage, resourcesByPackage, standaloneExtensions, totals };
 }
 
-async function readPlugins(cwd: string): Promise<PluginsResponse> {
-  const agentDir = getAgentDir();
+async function readPlugins(cwd: string, agentDirOverride?: string): Promise<PluginsResponse> {
+  const agentDir = agentDirOverride ?? getAgentDir();
   const projectTrust = getProjectTrustStatus(cwd, agentDir);
   const settingsManager = SettingsManager.create(cwd, agentDir, {
     projectTrusted: projectTrust.trusted,
@@ -403,16 +404,18 @@ function readScope(scope: unknown): PluginScope {
 }
 
 export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
   if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
 
   try {
-    const allowedRoots = await getAllowedFileRoots();
+    const allowedRoots = await getAllowedFileRoots(auth.user);
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
-    return NextResponse.json(await readPlugins(cwd));
+    return NextResponse.json(await readPlugins(cwd, auth.user?.agentDir));
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
@@ -422,6 +425,8 @@ export async function GET(req: Request) {
 // enable/disable also take { packages: [{ source, scope }] } in place of
 // source/scope and add per-package `results` to the response.
 export async function POST(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
@@ -439,12 +444,12 @@ export async function POST(req: Request) {
     };
     if (!body.cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
     if (!body.action) return NextResponse.json({ error: "action required" }, { status: 400 });
-    const allowedRoots = await getAllowedFileRoots();
+    const allowedRoots = await getAllowedFileRoots(auth.user);
     if (!isExistingFilePathAllowed(body.cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
-    const agentDir = getAgentDir();
+    const agentDir = auth.user?.agentDir ?? getAgentDir();
     const projectTrust = getProjectTrustStatus(body.cwd, agentDir);
     const settingsManager = SettingsManager.create(body.cwd, agentDir, {
       projectTrusted: projectTrust.trusted,

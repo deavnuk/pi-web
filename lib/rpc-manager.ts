@@ -3,7 +3,9 @@ import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync, writeFileSync } from "fs";
-import { resolve } from "path";
+import path from "path";
+import { dirname, resolve } from "path";
+import { fileURLToPath } from "url";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
@@ -56,6 +58,19 @@ import {
   readSessionToolSelection,
   validateSessionToolSelection,
 } from "./session-tool-selection";
+import { createUserContextExtension, userCommandEnvironment } from "./user-context-extension";
+import { createPersonaExtension } from "./persona-extension";
+import { userSkillsOverride } from "./user-skill-filter";
+import type { UserContext } from "./user-auth";
+import {
+  isWorkerModeEnabled,
+  isWorkerSessionProxy,
+  workerStartSession,
+  workerRequest,
+  WorkerSessionProxy,
+} from "./agent-worker-manager";
+
+export { WorkerSessionProxy, isWorkerSessionProxy };
 
 // ============================================================================
 // Types
@@ -67,6 +82,24 @@ export interface AgentEvent {
 }
 
 type EventListener = (event: AgentEvent) => void;
+
+/**
+ * The provider error an `agent_end`-style event carries, or null.
+ *
+ * A failed model call does not throw: the run ends normally with an assistant
+ * message whose `stopReason` is `error` and an `errorMessage`. Callers that only
+ * await the session going idle would take that for success, which is how a
+ * scheduled task whose provider was unreachable got recorded as `ok`.
+ */
+function assistantFailureOf(event: AgentEvent): string | null {
+  const message = (event as { message?: unknown }).message;
+  if (!message || typeof message !== "object") return null;
+  const record = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown };
+  if (record.role !== "assistant" || record.stopReason !== "error") return null;
+  return typeof record.errorMessage === "string" && record.errorMessage !== ""
+    ? record.errorMessage
+    : "The model call failed";
+}
 type AgentRunCompleteListener = (sessionId: string) => void;
 
 type PendingUiResponse = {
@@ -204,6 +237,8 @@ export interface RpcSessionStartOptions {
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /** Multi-user mode: start this session inside the user's worker process. */
+  user?: UserContext;
 }
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -297,6 +332,10 @@ export class AgentSessionWrapper {
   private agentRunNeedsCompletion = false;
   // Whether the last run ended because it was stopped (pi 1.1's `agent_settled.aborted`), not finished.
   private lastRunAborted = false;
+  // Why the last run produced no answer (provider unreachable, auth rejected, ...),
+  // or null when it finished. A caller that only waits for the session to go idle
+  // cannot otherwise tell "the model answered" from "the request failed".
+  private lastRunError: string | null = null;
   private promptAdmissionTail: Promise<void> = Promise.resolve();
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
@@ -396,6 +435,7 @@ export class AgentSessionWrapper {
       if (event.type === "agent_start") {
         this.agentRunNeedsCompletion = true;
         this.lastRunAborted = false;
+        this.lastRunError = null;
       }
       if (event.type === "agent_settled") this.lastRunAborted = event.aborted === true;
       if (event.type === "agent_end") {
@@ -403,6 +443,8 @@ export class AgentSessionWrapper {
         // Every tool call of the run has finished; nothing is left to replay.
         this.activeToolEvents.clear();
       }
+      const failure = assistantFailureOf(event);
+      if (failure) this.lastRunError = failure;
       this.trackActiveToolEvent(event);
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
@@ -446,7 +488,16 @@ export class AgentSessionWrapper {
 
   /** `prompt_done`, saying `aborted` when the prompt's run was stopped rather than finished. */
   private promptDoneEvent(): AgentEvent {
-    return { type: "prompt_done", ...(this.lastRunAborted ? { aborted: true } : {}) };
+    return {
+      type: "prompt_done",
+      ...(this.lastRunAborted ? { aborted: true } : {}),
+      ...(this.lastRunError ? { error: this.lastRunError } : {}),
+    };
+  }
+
+  /** Why the last run produced no answer, or null when it finished cleanly. */
+  get lastError(): string | null {
+    return this.lastRunError;
   }
 
   beginExtensionBinding(): void {
@@ -902,6 +953,9 @@ export class AgentSessionWrapper {
           contextUsage: contextUsage
             ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
             : null,
+          // A run that ended in a provider error looks exactly like a finished one
+          // to a caller polling isRunning(); say so explicitly.
+          lastError: this.lastRunError,
           // An exact prompt is projected onto each run by the inline extension. Every other
           // session reports `agent.state.systemPrompt`, which replays the transcript: that is
           // what the model actually saw, including sections a `before_agent_start` handler
@@ -1935,12 +1989,12 @@ export class AgentSessionWrapper {
 // ============================================================================
 
 declare global {
-  var __piSessions: Map<string, AgentSessionWrapper> | undefined;
-  var __piStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
+  var __piSessions: Map<string, AgentSessionWrapper | WorkerSessionProxy> | undefined;
+  var __piStartLocks: Map<string, Promise<{ session: AgentSessionWrapper | WorkerSessionProxy; realSessionId: string }>> | undefined;
   var __piStartingSessionCwds: Map<string, number> | undefined;
 }
 
-function getRegistry(): Map<string, AgentSessionWrapper> {
+function getRegistry(): Map<string, RpcSessionLike> {
   if (!globalThis.__piSessions) {
     globalThis.__piSessions = new Map();
     const destroy = () => globalThis.__piSessions?.forEach((session) => session.destroy());
@@ -1977,8 +2031,28 @@ function registerRpcWrapper(wrapper: AgentSessionWrapper): void {
   if (!wrapper.isChatOnly()) wrapper.beginExtensionBinding();
 }
 
+/**
+ * Register a worker-hosted session proxy in the main-process registry.
+ *
+ * Routes resolve sessions through `getRpcSession()` -> this registry, so an
+ * unregistered proxy makes every worker session look nonexistent: state
+ * queries answer "idle" mid-stream and the client tears down its own UI while
+ * the worker keeps running. Keyed by the real session id, which is what the
+ * client addresses after /api/agent/new hands it back.
+ */
+function registerWorkerSessionProxy(proxy: WorkerSessionProxy): void {
+  const registry = getRegistry();
+  if (proxy.sessionFile) cacheSessionPath(proxy.sessionId, proxy.sessionFile);
+  proxy.startObserving();
+  registry.set(proxy.sessionId, proxy);
+}
+
 const SUBAGENT_CONTROLLER = createSubagentController({
-  getSession: (sessionId) => getRegistry().get(sessionId),
+  getSession: (sessionId) => {
+    const session = getRegistry().get(sessionId);
+    if (!session || isWorkerSessionProxy(session)) return undefined;
+    return session;
+  },
   registerSession: (inner, options) => {
     const wrapper = new AgentSessionWrapper(inner, {
       ...(options?.exactSystemPrompt !== undefined
@@ -1989,8 +2063,13 @@ const SUBAGENT_CONTROLLER = createSubagentController({
     });
     registerRpcWrapper(wrapper);
   },
-  reopenSession: async (sessionId, sessionFile) =>
-    (await startRpcSession(sessionId, sessionFile, undefined)).session,
+  reopenSession: async (sessionId, sessionFile) => {
+    const started = await startRpcSession(sessionId, sessionFile, undefined);
+    if (isWorkerSessionProxy(started.session)) {
+      throw new Error("Subagents are not available across worker processes");
+    }
+    return started.session;
+  },
   resolveSessionPath,
   invalidateSessionList: invalidateSessionListCache,
   isBuiltInSubagentsEnabled,
@@ -2008,13 +2087,13 @@ export function abortSubagent(sessionId: string) {
   return SUBAGENT_CONTROLLER.abort(sessionId);
 }
 
-function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
+function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper | WorkerSessionProxy; realSessionId: string }>> {
   if (!globalThis.__piStartLocks) globalThis.__piStartLocks = new Map();
   return globalThis.__piStartLocks;
 }
 
 const CLOSING_SESSION_WAIT_MARGIN_MS = 1_000;
-const closingSessionWaits = new WeakMap<AgentSessionWrapper, { done: boolean; promise: Promise<void> }>();
+const closingSessionWaits = new WeakMap<RpcSessionLike, { done: boolean; promise: Promise<void> }>();
 
 /**
  * The wait for a wrapper of `sessionId` that is shutting down, or null when there is none
@@ -2069,12 +2148,16 @@ function trackStartingSession(cwd: string): () => void {
   };
 }
 
-export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
+export type RpcSessionLike = AgentSessionWrapper | WorkerSessionProxy;
+
+export function getRpcSession(sessionId: string): RpcSessionLike | undefined {
   return getRegistry().get(sessionId);
 }
 
 export interface SetRpcSessionToolsResult {
-  session: AgentSessionWrapper;
+  // Worker-hosted sessions resolve to a proxy: callers only use sessionId/
+  // recreated (the session itself keeps running inside the user's worker).
+  session: AgentSessionWrapper | WorkerSessionProxy;
   sessionId: string;
   recreated: boolean;
 }
@@ -2089,11 +2172,35 @@ export async function setRpcSessionTools(
   sessionId: string,
   sessionFile: string | undefined,
   requestedToolNames: unknown,
+  user?: UserContext | null,
 ): Promise<SetRpcSessionToolsResult> {
   const toolNames = requestedToolNames === undefined
     ? undefined
     : validateSessionToolSelection(requestedToolNames);
   const existing = getRpcSession(sessionId);
+
+  // Multi-user: the worker hosts the session; forward the whole flow there.
+  if (user && isWorkerModeEnabled() && (!existing || isWorkerSessionProxy(existing))) {
+    const result = await workerRequest(user, {
+      op: "setTools",
+      sessionId,
+      sessionFile,
+      options: { toolNames: requestedToolNames },
+    });
+    const data = (result ?? {}) as { realSessionId?: string; sessionId?: string; recreated?: boolean };
+    // The worker may have recreated the session; refresh the local proxy.
+    const previous = getRpcSession(sessionId);
+    const proxy = await workerStartSession(user, sessionId, sessionFile ?? "", undefined, { user });
+    if (isWorkerSessionProxy(previous) && previous !== proxy) {
+      proxy.adoptObservedState(previous);
+    }
+    registerWorkerSessionProxy(proxy);
+    return {
+      session: proxy,
+      sessionId: data.realSessionId ?? proxy.realSessionId,
+      recreated: Boolean(data.recreated),
+    };
+  }
 
   if (!existing?.isAlive()) {
     if (!sessionFile) throw new Error("Session not found");
@@ -2117,7 +2224,8 @@ export async function setRpcSessionTools(
   }
 
   if (existing.isRunning()) throw new Error("Cannot change tools while the session is running");
-  if (readSubagentSessionResources(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
+  const localWrapper = isWorkerSessionProxy(existing) ? null : existing;
+  if (localWrapper && readSubagentSessionResources(localWrapper.inner.sessionManager.getEntries() as unknown as SessionEntry[])) {
     throw new Error("Subagent tool selection is fixed by its profile");
   }
 
@@ -2126,21 +2234,23 @@ export async function setRpcSessionTools(
   const crossesChatOnlyBoundary = toolNames === undefined
     || !hasCurrentResourcePolicy
     || existing.isChatOnly() !== (toolNames.length === 0);
-  if (toolNames === undefined) appendClearedSessionToolSelection(existing.inner.sessionManager);
-  else appendSessionToolSelection(existing.inner.sessionManager, toolNames);
+  if (localWrapper) {
+    if (toolNames === undefined) appendClearedSessionToolSelection(localWrapper.inner.sessionManager);
+    else appendSessionToolSelection(localWrapper.inner.sessionManager, toolNames);
+  }
   invalidateSessionListCache();
 
-  if (toolNames !== undefined && !crossesChatOnlyBoundary) {
-    existing.setActiveToolSelection(toolNames);
-    return { session: existing, sessionId, recreated: false };
+  if (toolNames !== undefined && !crossesChatOnlyBoundary && localWrapper) {
+    localWrapper.setActiveToolSelection(toolNames);
+    return { session: localWrapper, sessionId, recreated: false };
   }
 
   const persistedFile = existing.sessionFile && existsSync(existing.sessionFile)
     ? existing.sessionFile
     : undefined;
   const sessionCwd = existing.cwd;
-  const model = existing.inner.model;
-  const currentThinkingLevel = existing.inner.agent.state?.thinkingLevel;
+  const model = localWrapper?.inner.model;
+  const currentThinkingLevel = localWrapper?.inner.agent.state?.thinkingLevel;
   await existing.shutdown();
 
   if (persistedFile) {
@@ -2185,6 +2295,9 @@ export function getRpcSessionInfos(options: { includeTransient?: boolean } = {})
   const sessions: SessionInfo[] = [];
   for (const session of getRegistry().values()) {
     if (typeof session.isAlive !== "function" || !session.isAlive()) continue;
+    // Worker-hosted sessions are reported through the worker path; the main
+    // process registry only tracks them as proxies for routing.
+    if (isWorkerSessionProxy(session)) continue;
 
     const manager = session.inner?.sessionManager;
     if (!manager) continue;
@@ -2284,8 +2397,32 @@ export async function startRpcSession(
   sessionFile: string,
   cwd: string | undefined,
   options: RpcSessionStartOptions = {},
-): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
-  const { initialModel, allowInitialModelFallback, thinkingLevel } = options;
+): Promise<{ session: AgentSessionWrapper | WorkerSessionProxy; realSessionId: string }> {
+  const { initialModel, allowInitialModelFallback, thinkingLevel, user } = options;
+
+  // Multi-user mode: the session runs inside the user's worker process with
+  // its own agentDir env. The main process holds only a thin proxy.
+  if (user && isWorkerModeEnabled()) {
+    const previousProxy = getRegistry().get(sessionId);
+    const proxy = await workerStartSession(user, sessionId, sessionFile, cwd, {
+      ...(options.toolNames !== undefined ? { toolNames: options.toolNames } : {}),
+      ...(initialModel ? { initialModel } : {}),
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+      ...(options.allowInitialModelFallback !== undefined
+        ? { allowInitialModelFallback }
+        : {}),
+    });
+    if (proxy.sessionFile) cacheSessionPath(proxy.sessionId, proxy.sessionFile);
+    // The worker may have re-created the session (tool-selection changes,
+    // respawn); carry the previously observed run state forward so a restart
+    // in the middle of a run does not momentarily report idle.
+    if (isWorkerSessionProxy(previousProxy) && previousProxy !== proxy) {
+      proxy.adoptObservedState(previousProxy);
+    }
+    registerWorkerSessionProxy(proxy);
+    return { session: proxy, realSessionId: proxy.realSessionId };
+  }
+
   const requestedToolNames = options.toolNames === undefined
     ? undefined
     : validateSessionToolSelection(options.toolNames);
@@ -2301,7 +2438,7 @@ export async function startRpcSession(
   const closingWait = closingRpcSessionWait(sessionId);
   if (closingWait) {
     // Concurrent starts share this lock, then the one start that follows it.
-    const waiting: Promise<{ session: AgentSessionWrapper; realSessionId: string }> = closingWait.then(() => {
+    const waiting: Promise<{ session: AgentSessionWrapper | WorkerSessionProxy; realSessionId: string }> = closingWait.then(() => {
       if (locks.get(sessionId) === waiting) locks.delete(sessionId);
       return startRpcSession(sessionId, sessionFile, cwd, options);
     });
@@ -2337,7 +2474,7 @@ export async function startRpcSession(
   const starting = (async () => {
     // Some extensions access the SDK's global theme even outside the terminal UI.
     if (!chatOnly) initTheme();
-    const agentDir = getAgentDir();
+    const agentDir = user?.agentDir ?? getAgentDir();
 
     // Determine which tools to pass based on requested toolNames.
     // Since v0.68.0, session creation expects string[] tool names instead of Tool[] instances.
@@ -2382,6 +2519,11 @@ export async function startRpcSession(
       exactSystemPrompt: subagentResources.exactSystemPrompt
         ?? (chatOnly ? subagentResources.appendSystemPrompt[0] ?? "" : undefined),
     }) : undefined;
+    // FR-4.6: a user may temporarily disable an assigned skill for themselves.
+    // Applied in-memory here (never by rewriting the admin-distributed file).
+    const skillsOverride = user && !subagentResources
+      ? userSkillsOverride(agentDir)
+      : undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2410,14 +2552,24 @@ export async function startRpcSession(
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
                 settings: settingsManager,
+                // FR-5.3: inject user identity + skill secrets into every
+                // bash subprocess (multi-user sessions only).
+                ...(user ? { additionalEnv: () => userCommandEnvironment(user) } : {}),
               }),
               createSubagentExtension(
                 SUBAGENT_CONTROLLER.extensionRuntime,
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
               ),
+              ...(user ? [createUserContextExtension(user)] : []),
+              // FR-5.4: department persona (non-admin) / live identity block
+              // (all users) — injected each turn so it can't go stale.
+              ...(user
+                ? [createPersonaExtension(user, resolve(path.dirname(fileURLToPath(import.meta.url)), ".."))]
+                : []),
             ],
             extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
+            ...(skillsOverride ? { skillsOverride } : {}),
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });
@@ -2494,7 +2646,9 @@ export async function startRpcSession(
       exactSystemPrompt,
       chatOnly,
       onAgentRunComplete: (completedSessionId) => {
-        void notifySessionComplete(completedSessionId).catch((error) => {
+        // Scope the push to the session owner: in multi-user mode an
+        // unscoped notification would light up every subscribed browser.
+        void notifySessionComplete(completedSessionId, user?.userId).catch((error) => {
           console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);
         });
       },

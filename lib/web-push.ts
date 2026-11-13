@@ -11,6 +11,12 @@ export interface PushSubscriptionRecord {
   endpoint: string;
   keys: { p256dh: string; auth: string };
   locale: string;
+  /**
+   * Owner of this browser subscription. Absent on records written before
+   * multi-user support existed; those are treated as legacy/shared and only
+   * receive notifications sent without a userId.
+   */
+  userId?: string;
 }
 
 interface PushStateFile {
@@ -33,7 +39,16 @@ interface WebPushEnvironment {
 export interface WebPushNotifier {
   getVapidPublicKey: () => string;
   addSubscription: (subscription: PushSubscriptionRecord) => void;
-  notifySessionComplete: (sessionId: string) => Promise<void>;
+  /**
+   * Notify that a session finished.
+   *
+   * When `userId` is given, delivery is restricted to that user's own
+   * subscriptions — a scheduled task must never pop a notification on a
+   * colleague's desktop. When omitted (single-user mode, or a subagent run
+   * with no owner context) every subscription is notified, preserving the
+   * original behaviour.
+   */
+  notifySessionComplete: (sessionId: string, userId?: string) => Promise<void>;
 }
 
 function stateFilePath(): string {
@@ -144,8 +159,11 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
       ];
       saveState();
     },
-    async notifySessionComplete(sessionId) {
-      if (state.subscriptions.length === 0) return;
+    async notifySessionComplete(sessionId, userId) {
+      const targets = userId === undefined
+        ? state.subscriptions
+        : state.subscriptions.filter((s) => s.userId === userId);
+      if (targets.length === 0) return;
       const sessionName = (await environment.listSessionNames()).get(sessionId);
       const payloadFor = (locale: string) => ({
         title: sessionName ?? localeText(locale, "sessionComplete"),
@@ -155,7 +173,7 @@ export function createWebPushNotifier(environment: WebPushEnvironment): WebPushN
       });
 
       let pruned = false;
-      for (const subscription of [...state.subscriptions]) {
+      for (const subscription of [...targets]) {
         try {
           await environment.send(
             subscription,
@@ -194,7 +212,7 @@ export function addSubscription(subscription: PushSubscriptionRecord): Promise<v
   return getNotifier().then((notifier) => notifier.addSubscription(subscription));
 }
 
-export async function notifySessionComplete(sessionId: string): Promise<void> {
+export async function notifySessionComplete(sessionId: string, userId?: string): Promise<void> {
   const notifier = await getNotifier();
-  await notifier.notifySessionComplete(sessionId);
+  await notifier.notifySessionComplete(sessionId, userId);
 }

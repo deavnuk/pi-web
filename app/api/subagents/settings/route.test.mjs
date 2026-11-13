@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../../__tests__/test-user.mjs";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const testAgentDir = await mkdtemp(join(tmpdir(), "pi-web-subagent-settings-route-"));
@@ -16,6 +17,10 @@ const jiti = createJiti(import.meta.url, {
 });
 const { GET, PUT } = await jiti.import("./route.ts");
 
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
+
 after(async () => {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
@@ -25,13 +30,15 @@ after(async () => {
 function request(body, contentType = "application/json") {
   return new Request("http://localhost/api/subagents/settings", {
     method: "PUT",
-    headers: { "Content-Type": contentType, Host: "localhost" },
+    headers: { authorization: testAuth, "Content-Type": contentType, Host: "localhost" },
     body: JSON.stringify(body),
   });
 }
 
 test("settings route defaults off and persists both switch states", async () => {
-  let response = await GET();
+  let response = await GET(new Request("http://localhost/api/subagents/settings", {
+    headers: { authorization: testAuth, Host: "localhost" },
+  }));
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { enabled: false, maxConcurrent: 10 });
 

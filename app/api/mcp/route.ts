@@ -46,6 +46,7 @@ import type { PiSdkInternals } from "@/lib/pi-sdk-internals";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { freshFolderTrustBreadth, getProjectTrustStatus, trustFreshFolderAndWrite } from "@/lib/project-trust";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { requireAuth, type UserContext } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -103,23 +104,27 @@ function asRefusal(refused: McpEntryRefusal): Refusal {
 }
 
 /** The project folder the request names, checked as Test, sign-in and the trust route check it (`validateMcpProject()`). */
-async function validateProject(value: unknown): Promise<Project | Refusal> {
-  const result = await validateMcpProject(value);
+async function validateProject(value: unknown, user: UserContext | null): Promise<Project | Refusal> {
+  const result = await validateMcpProject(value, user);
   return isMcpEntryRefusal(result) ? asRefusal(result) : result;
 }
 
 // GET /api/mcp?cwd=<absolute project folder>
 export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
+  const agentDir = user?.agentDir ?? getAgentDir();
   const value = new URL(req.url).searchParams.get("cwd");
   let project: Project | undefined;
   if (value !== null) {
-    const result = await validateProject(value);
+    const result = await validateProject(value, user);
     if (result instanceof Refusal) return result.response();
     project = result;
   }
 
   try {
-    return NextResponse.json((await readMcpOverview({ agentDir: getAgentDir(), project })) satisfies McpResponse);
+    return NextResponse.json((await readMcpOverview({ agentDir, project })) satisfies McpResponse);
   } catch (error) {
     return refusal(500, "internal", errorMessage(error));
   }
@@ -368,7 +373,7 @@ async function removeServer(agentDir: string, project: Project | undefined, serv
  * undo returns the file to what it held a moment ago; the panel shows such an
  * entry as refused. A name the file defines again since is never replaced.
  */
-async function undoRemoval(agentDir: string, project: Project | undefined, token: string) {
+async function undoRemoval(agentDir: string, project: Project | undefined, token: string, user: UserContext | null) {
   const held = takeRemovedEntry(token);
   if (!held) return refusal(410, "undo-unavailable", "Nothing to undo: the removal is unknown, already undone, or older than 60 seconds");
   const server = { scope: held.scope, name: held.name };
@@ -376,7 +381,7 @@ async function undoRemoval(agentDir: string, project: Project | undefined, token
   try {
     let heldProject: Project | undefined;
     if (held.scope === "project") {
-      const result = await validateProject(held.cwd);
+      const result = await validateProject(held.cwd, user);
       if (result instanceof Refusal) failure = result;
       else heldProject = result;
     }
@@ -590,6 +595,9 @@ async function addServer(
 // `cwd` is the panel's project: required for a project server, and the
 // overview in the answer covers it.
 export async function POST(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   if (!isApiRequestAllowed(req)) return refusal(403, "request-denied", "Untrusted API request");
   if (!hasJsonContentType(req)) return refusal(415, "content-type", "Content-Type must be application/json");
   let body: unknown;
@@ -602,14 +610,14 @@ export async function POST(req: Request) {
 
   let project: Project | undefined;
   if (body.cwd !== undefined && body.cwd !== null) {
-    const result = await validateProject(body.cwd);
+    const result = await validateProject(body.cwd, user);
     if (result instanceof Refusal) return result.response();
     project = result;
   }
 
   const internals = await mcpWritable();
   if (internals instanceof Refusal) return internals.response();
-  const agentDir = getAgentDir();
+  const agentDir = user?.agentDir ?? getAgentDir();
 
   try {
     switch (body.action) {
@@ -650,7 +658,7 @@ export async function POST(req: Request) {
         if (typeof body.token !== "string" || body.token.length === 0 || body.token.length > 100) {
           return refusal(400, "invalid-request", "token must be the token a remove answered with");
         }
-        return await undoRemoval(agentDir, project, body.token);
+        return await undoRemoval(agentDir, project, body.token, user);
       }
       case "add":
         return await addServer(agentDir, project, internals, body);

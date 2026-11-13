@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-web-open-in-explorer-agent-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -15,12 +16,16 @@ const jiti = createJiti(import.meta.url, {
 });
 const { POST } = await jiti.import("./route.ts");
 
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
+
 test.after(() => rm(agentDir, { recursive: true, force: true }));
 
 function open(cwd, host = "localhost:30141") {
   return POST(new Request("http://localhost/api/open-in-explorer", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Host: host },
+    headers: { authorization: testAuth, "Content-Type": "application/json", Host: host },
     body: JSON.stringify({ cwd }),
   }));
 }

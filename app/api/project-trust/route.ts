@@ -13,6 +13,7 @@ import { invalidateModelsCache } from "@/lib/models-cache";
 import { getProjectTrustStatus, trustProject } from "@/lib/project-trust";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { destroyRpcSessionsForCwd, hasBusyRpcSessionForCwd } from "@/lib/rpc-manager";
+import { requireAuth, type UserContext } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -31,10 +32,11 @@ function refusal(status: number, reason: McpRefusalReason, error: string) {
  * server process's own folder, and a folder outside the roots gets 403
  * whether or not it exists.
  */
-async function validateCwd(value: unknown): Promise<
-  { cwd: string; allowedRoots: Set<string> } | { response: NextResponse }
-> {
-  const result = await validateMcpProject(value);
+async function validateCwd(
+  value: unknown,
+  user: UserContext | null,
+): Promise<{ cwd: string; allowedRoots: Set<string> } | { response: NextResponse }> {
+  const result = await validateMcpProject(value, user);
   if (isMcpEntryRefusal(result)) return { response: NextResponse.json(result.body, { status: result.status }) };
   return result;
 }
@@ -54,9 +56,11 @@ async function listProjectMcpServers(agentDir: string, cwd: string, allowedRoots
 // the files only, like GET /api/mcp: no server is spawned, no value resolved,
 // no `!command` run, and env and header values never leave the server.
 export async function GET(req: Request) {
-  const result = await validateCwd(new URL(req.url).searchParams.get("cwd"));
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const result = await validateCwd(new URL(req.url).searchParams.get("cwd"), auth.user);
   if ("response" in result) return result.response;
-  const agentDir = getAgentDir();
+  const agentDir = auth.user?.agentDir ?? getAgentDir();
   // Listed whatever the trust store says: the listing does not depend on it,
   // and a dialog left without one would offer Trust with nothing listed.
   const listing = await listProjectMcpServers(agentDir, result.cwd, result.allowedRoots);
@@ -75,13 +79,15 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   if (!isApiRequestAllowed(req)) return refusal(403, "request-denied", "Untrusted API request");
   if (!hasJsonContentType(req)) return refusal(415, "content-type", "Content-Type must be application/json");
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
     // A body that is not JSON names no cwd.
     const body = await req.json().catch(() => null) as { cwd?: unknown } | null;
-    const result = await validateCwd(body?.cwd);
+    const result = await validateCwd(body?.cwd, auth.user);
     if ("response" in result) return result.response;
 
-    const agentDir = getAgentDir();
+    const agentDir = auth.user?.agentDir ?? getAgentDir();
     const current = getProjectTrustStatus(result.cwd, agentDir);
     if (!current.requiresTrust) {
       return refusal(409, "trust-not-required", "This project has no resources that require trust");

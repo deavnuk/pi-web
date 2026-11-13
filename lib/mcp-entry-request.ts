@@ -5,6 +5,7 @@ import { getAgentDir, type McpServerConfig } from "@earendil-works/pi-coding-age
 import type { McpErrorResponse, McpRefusalReason, McpScope } from "./api-types";
 import { isMcpDisabledByOperator, MCP_DISABLE_VARIABLE } from "./builtin-extensions";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "./file-access";
+import type { UserContext } from "./user-auth";
 import { readMcpServerDefinition, readMcpServerEntry } from "./mcp-config-read";
 import { findWebPasswordField } from "./mcp-transport";
 import { loadPiSdkInternals, type PiSdkInternals } from "./pi-sdk-internals";
@@ -101,11 +102,14 @@ export function readMcpServerConfig(options: {
  * `cwd-denied`) — and only then a directory (400 `cwd-not-directory`), so a
  * folder outside the roots gets the same answer whether or not it exists.
  */
-export async function validateMcpProject(value: unknown): Promise<McpRequestProject | McpEntryRefusal> {
+export async function validateMcpProject(
+  value: unknown,
+  user: UserContext | null = null,
+): Promise<McpRequestProject | McpEntryRefusal> {
   if (typeof value !== "string" || !value.trim() || !isAbsolute(value)) {
     return mcpEntryRefusal(400, "cwd-invalid", "cwd must be an absolute path");
   }
-  const allowedRoots = await getAllowedFileRoots();
+  const allowedRoots = await getAllowedFileRoots(user);
   if (!isExistingFilePathAllowed(value, allowedRoots)) return mcpEntryRefusal(403, "cwd-denied", "Access denied");
   const cwd = resolve(value);
   let directory = false;
@@ -169,7 +173,10 @@ export function mcpProjectTrustRefusal(
  * (`server-missing`), not an object, refused by the SDK's validator
  * (`server-invalid`), or referencing PI_WEB_PASSWORD (`web-password`).
  */
-export async function readConnectableMcpEntry(req: Request): Promise<McpConnectableEntry | McpEntryRefusal> {
+export async function readConnectableMcpEntry(
+  req: Request,
+  user: UserContext | null = null,
+): Promise<McpConnectableEntry | McpEntryRefusal> {
   if (!isApiRequestAllowed(req)) return mcpEntryRefusal(403, "request-denied", "Untrusted API request");
   if (!hasJsonContentType(req)) return mcpEntryRefusal(415, "content-type", "Content-Type must be application/json");
   let body: unknown;
@@ -187,7 +194,9 @@ export async function readConnectableMcpEntry(req: Request): Promise<McpConnecta
 
   let project: McpRequestProject | undefined;
   if (body.cwd !== undefined && body.cwd !== null) {
-    const result = await validateMcpProject(body.cwd);
+    // Checked against THIS user's roots: a project another user validated or
+    // opened is not a root here.
+    const result = await validateMcpProject(body.cwd, user);
     if (isMcpEntryRefusal(result)) return result;
     project = result;
   }
@@ -196,7 +205,7 @@ export async function readConnectableMcpEntry(req: Request): Promise<McpConnecta
   const internals = await mcpInternalsOrRefusal("connects no MCP server");
   if (isMcpEntryRefusal(internals)) return internals;
 
-  const agentDir = getAgentDir();
+  const agentDir = user?.agentDir ?? getAgentDir();
   if (scope === "project" && project) {
     const refused = mcpProjectTrustRefusal(project.cwd, agentDir);
     if (refused) return refused;

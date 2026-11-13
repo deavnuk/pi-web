@@ -1,10 +1,15 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { isProviderUsageId, queryProviderUsage } from "@/lib/provider-usage";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  // Provider calls spend the deployment's credentials and quota, so they
+  // require an account (the SDK runtime reads the caller-supplied agentDir).
+  const auth = await requireAuth(request);
+  if ("response" in auth) return auth.response;
   if (!isApiRequestAllowed(request)) return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   if (!hasJsonContentType(request)) return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
 

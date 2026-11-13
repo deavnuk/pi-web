@@ -15,7 +15,9 @@ import {
   readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
-import { abortSubagent, getRpcSession, getRpcSessionInfos } from "@/lib/rpc-manager";
+import { abortSubagent, getRpcSession, getRpcSessionInfos, isWorkerSessionProxy } from "@/lib/rpc-manager";
+import { ownsLiveSession } from "@/lib/session-ownership";
+import { isSessionPathForUser, requireAuth } from "@/lib/user-auth";
 import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import { computeSessionStats } from "@/lib/session-stats";
@@ -31,6 +33,9 @@ export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   const { id } = await params;
   const perf = startServerPerf("GET /api/sessions/[id]");
   try {
@@ -38,20 +43,29 @@ export async function GET(
     const rpc = getRpcSession(id);
     const searchParams = new URL(req.url).searchParams;
     const force = searchParams.get("force") === "1";
+    // Worker proxies have no in-process SessionManager; always fall through to
+    // the persisted file (the worker owns the live copy).
+    // Structural check, not instanceof: scheduled-task sessions are registered
+    // by the instrumentation bundle's WorkerSessionProxy copy, which this
+    // bundle's class does not recognize (shared global registry, separate
+    // webpack compilations).
+    // A live wrapper is only used when this account owns it; otherwise fall
+    // through to `resolveSessionPath` below, which is scoped to their agentDir.
+    const liveCandidate = isWorkerSessionProxy(rpc) || !ownsLiveSession(rpc ?? {}, user) ? undefined : rpc;
 
     // A live wrapper only reflects the appends pi-web itself made. When another
     // pi process (the TUI) writes the same session file, the in-memory index
     // stays stale. Only probe on ?force=1 (session mount / page refresh): two
     // processes writing one JSONL is unsupported, so post-turn reads must not
     // scan disk. Eviction is idle-only; mid-run the wrapper owns the write path.
-    let liveWrapper = rpc?.isAlive() ? rpc : undefined;
+    let liveWrapper = liveCandidate?.isAlive() ? liveCandidate : undefined;
     let wrapperRebuilt = false;
     if (force && liveWrapper?.evictIfDiskAhead()) {
       wrapperRebuilt = true;
       liveWrapper = undefined;
     }
     const liveRpc = liveWrapper;
-    const resolvedPath = liveRpc ? null : await resolveSessionPath(id);
+    const resolvedPath = liveRpc ? null : await resolveSessionPath(id, user?.agentDir);
     if (!liveRpc && !resolvedPath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
@@ -102,7 +116,7 @@ export async function GET(
     let modified = header?.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
     const parentSessionId = header?.parentSession
-      ? await resolveSessionIdByPath(header.parentSession)
+      ? await resolveSessionIdByPath(header.parentSession, user?.agentDir)
       : undefined;
     const subagent = header
       ? readSubagentRun(entries as never, header.id, filePath)
@@ -175,13 +189,15 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   const { id } = await params;
   try {
     const { name } = await req.json() as { name?: string };
     if (typeof name !== "string") {
       return NextResponse.json({ error: "name is required" }, { status: 400 });
     }
-    const filePath = await resolveSessionPath(id);
+    const filePath = await resolveSessionPath(id, auth.user?.agentDir);
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
@@ -199,12 +215,14 @@ export async function PATCH(
 
 // DELETE /api/sessions/[id]
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   const { id } = await params;
   try {
-    const filePath = await resolveSessionPath(id);
+    const filePath = await resolveSessionPath(id, auth.user?.agentDir);
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
@@ -229,11 +247,15 @@ export async function DELETE(
 
     const targetPathKey = sessionPathKey(filePath);
     const dir = dirname(filePath);
+    const ownerAgentDir = auth.user.agentDir;
     // Deleting a session also deletes every persisted or live subagent below it.
+    // Both sources are scoped to the caller: an unscoped catalogue made another
+    // user's session id reachable as a "child", and the collected path was then
+    // unlinked — a cross-user delete driven by a crafted session header.
     const sessions = mergeSessionLists(
-      await listAllSessions({ force: true }),
+      await listAllSessions({ force: true, agentDir: ownerAgentDir }),
       getRpcSessionInfos({ includeTransient: true }),
-    );
+    ).filter((session) => isSessionPathForUser(session.path, auth.user));
     const childrenByParent = new Map<string, string[]>();
     for (const session of sessions) {
       if (session.relation?.kind !== "subagent") continue;
@@ -280,12 +302,18 @@ export async function DELETE(
     }
     for (const deletedId of deletedSessionIds) {
       if (deletedPaths.has(deletedId)) continue;
-      const runtimePath = getRpcSession(deletedId)?.sessionFile;
+      const live = getRpcSession(deletedId);
+      const runtimePath = live && ownsLiveSession(live, auth.user) ? live.sessionFile : undefined;
       if (runtimePath) deletedPaths.set(deletedId, runtimePath);
       else {
-        const resolvedPath = await resolveSessionPath(deletedId);
+        const resolvedPath = await resolveSessionPath(deletedId, ownerAgentDir);
         if (resolvedPath) deletedPaths.set(deletedId, resolvedPath);
       }
+    }
+    // Last gate before the unlink loop: only paths inside this account's own
+    // sessions tree may be removed, whatever assembled them.
+    for (const [deletedId, deletedPath] of [...deletedPaths]) {
+      if (!isSessionPathForUser(deletedPath, auth.user)) deletedPaths.delete(deletedId);
     }
     const deletedPathKeys = new Set([...deletedPaths.values()].map((path) => sessionPathKey(path)));
 
@@ -343,7 +371,8 @@ export async function DELETE(
     for (const deletedId of [...deletedSessionIds].reverse()) {
       if (deletedId === id) continue;
       try { await abortSubagent(deletedId); } catch { /* idle or completed */ }
-      await getRpcSession(deletedId)?.shutdown();
+      const child = getRpcSession(deletedId);
+      if (child && ownsLiveSession(child, auth.user)) await child.shutdown();
     }
     try { await abortSubagent(id); } catch { /* ordinary session */ }
     await getRpcSession(id)?.shutdown();

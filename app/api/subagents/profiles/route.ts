@@ -9,12 +9,14 @@ import {
   type SubagentWritableScope,
 } from "@/lib/subagents";
 import { writeDisabledBuiltInSubagent } from "@/lib/subagent-settings";
+import { requireAuth, type UserContext } from "@/lib/user-auth";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const dynamic = "force-dynamic";
 
-async function validateCwd(cwd: unknown): Promise<string> {
+async function validateCwd(cwd: unknown, user: UserContext | null): Promise<string> {
   if (typeof cwd !== "string" || !cwd || !existsSync(cwd)) throw new Error("Valid cwd required");
-  if (!isExistingFilePathAllowed(cwd, await getAllowedFileRoots())) throw new Error("Access denied");
+  if (!isExistingFilePathAllowed(cwd, await getAllowedFileRoots(user))) throw new Error("Access denied");
   return cwd;
 }
 
@@ -31,9 +33,11 @@ function validateToggleScope(scope: unknown): SubagentWritableScope | "builtin" 
 }
 
 export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
-    const cwd = await validateCwd(new URL(req.url).searchParams.get("cwd"));
-    return NextResponse.json({ profiles: listSubagentProfileSources(cwd) });
+    const cwd = await validateCwd(new URL(req.url).searchParams.get("cwd"), auth.user);
+    return NextResponse.json({ profiles: listSubagentProfileSources(cwd, auth.user?.agentDir) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: message === "Access denied" ? 403 : 400 });
@@ -41,18 +45,20 @@ export async function GET(req: Request) {
 }
 
 export async function PUT(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
     const body = await req.json() as {
       cwd?: unknown;
       scope?: unknown;
       profile?: Omit<SubagentProfile, "scope" | "filePath">;
     };
-    const cwd = await validateCwd(body.cwd);
+    const cwd = await validateCwd(body.cwd, auth.user);
     const scope = validateScope(body.scope);
     if (!body.profile || typeof body.profile.name !== "string") {
       return NextResponse.json({ error: "profile required" }, { status: 400 });
     }
-    return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, body.profile) });
+    return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, body.profile, auth.user?.agentDir) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: message === "Access denied" ? 403 : 400 });
@@ -60,14 +66,16 @@ export async function PUT(req: Request) {
 }
 
 export async function PATCH(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
     const body = await req.json() as { cwd?: unknown; scope?: unknown; name?: unknown; enabled?: unknown };
-    const cwd = await validateCwd(body.cwd);
+    const cwd = await validateCwd(body.cwd, auth.user);
     const scope = validateToggleScope(body.scope);
     if (typeof body.name !== "string") return NextResponse.json({ error: "name required" }, { status: 400 });
     if (typeof body.enabled !== "boolean") return NextResponse.json({ error: "enabled required" }, { status: 400 });
     const name = body.name;
-    const source = listSubagentProfileSources(cwd).find((profile) =>
+    const source = listSubagentProfileSources(cwd, auth.user?.agentDir).find((profile) =>
       profile.scope === scope && profile.name.toLowerCase() === name.toLowerCase()
     );
     if (!source) return NextResponse.json({ error: "Agent profile not found" }, { status: 404 });
@@ -92,7 +100,7 @@ export async function PATCH(req: Request) {
       runInBackground: source.runInBackground,
       enabled: source.enabled,
     };
-    return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, { ...profile, enabled: body.enabled }) });
+    return NextResponse.json({ profile: saveSubagentProfile(cwd, scope, { ...profile, enabled: body.enabled }, auth.user?.agentDir) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: message }, { status: message === "Access denied" ? 403 : 400 });
@@ -100,12 +108,14 @@ export async function PATCH(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
     const body = await req.json() as { cwd?: unknown; scope?: unknown; name?: unknown };
-    const cwd = await validateCwd(body.cwd);
+    const cwd = await validateCwd(body.cwd, auth.user);
     const scope = validateScope(body.scope);
     if (typeof body.name !== "string") return NextResponse.json({ error: "name required" }, { status: 400 });
-    deleteSubagentProfile(cwd, scope, body.name);
+    deleteSubagentProfile(cwd, scope, body.name, auth.user?.agentDir);
     return NextResponse.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

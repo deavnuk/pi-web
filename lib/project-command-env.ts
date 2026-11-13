@@ -26,6 +26,8 @@ type ProjectCommandBashOperationsOptions = {
   localOperations?: BashOperations;
   platform?: NodeJS.Platform;
   shellPath?: string;
+  /** Merged into the sanitized environment just before exec (per-user secrets). */
+  additionalEnv?: () => Record<string, string>;
 };
 
 type BashExecResult = Awaited<ReturnType<BashOperations["exec"]>>;
@@ -37,7 +39,11 @@ function isHostRuntimeVariable(name: string, platform: NodeJS.Platform): boolean
     || comparableName.startsWith("NEXT_")
     // The browser login password guards this server; commands run on behalf of
     // a project (and the model reading their output) have no use for it.
-    || comparableName === "PI_WEB_PASSWORD";
+    || comparableName === "PI_WEB_PASSWORD"
+    // The bootstrap admin password is a credential for the whole deployment.
+    // The sandbox already hides other users' files, but leaking it into a shell
+    // the model can read is an avoidable exposure (sandbox-design.md §9.1).
+    || comparableName === "PI_SMARTFICC_ADMIN_PASSWORD";
 }
 
 export function sanitizeProjectCommandEnvironment(
@@ -86,6 +92,9 @@ export function createProjectCommandBashOperations(
         agentBinDir,
         platform,
       );
+      if (options.additionalEnv) {
+        Object.assign(environment, options.additionalEnv());
+      }
       const { onData, signal, timeout } = executionOptions;
       let released = false;
       const execution = localOperations.exec(command, cwd, {
@@ -144,6 +153,8 @@ export function createProjectCommandBashOperations(
 export function createProjectCommandBashExtension(options: {
   cwd: string;
   settings: ProjectShellSettings;
+  /** Per-session env additions merged into every bash command (user secrets). */
+  additionalEnv?: () => Record<string, string>;
 }): InlineExtension {
   return {
     name: HOST_EXTENSION_NAME,
@@ -157,6 +168,7 @@ export function createProjectCommandBashExtension(options: {
             commandPrefix: options.settings.getShellCommandPrefix(),
             operations: createProjectCommandBashOperations({
               shellPath: options.settings.getShellPath(),
+              ...(options.additionalEnv ? { additionalEnv: options.additionalEnv } : {}),
             }),
           });
           return executionDefinition.execute(toolCallId, params, signal, onUpdate, context);

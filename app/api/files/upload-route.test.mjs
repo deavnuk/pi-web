@@ -2,28 +2,36 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-route-")));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-const previousRoots = globalThis.__piAllowedRootsCache;
 process.env.PI_CODING_AGENT_DIR = path.join(base, "agent");
 test.after(() => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-  globalThis.__piAllowedRootsCache = previousRoots;
   fs.rmSync(base, { recursive: true, force: true });
 });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, interopDefault: true });
 const { POST } = await jiti.import("./[...path]/route.ts");
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
+
 const { encodeFilePathForApi } = await jiti.import("../../../lib/file-paths.ts");
 const { NextRequest } = await jiti.import("next/server");
+const { allowFileRootForUser } = await jiti.import("../../../lib/allowed-roots.ts");
+const { resolveAuthUser } = await jiti.import("../../../lib/user-auth.ts");
+const testUser = await resolveAuthUser(new Request("http://localhost/", { headers: { authorization: testAuth } }));
 
 function fixture() {
   const directory = fs.mkdtempSync(path.join(base, "files-"));
-  globalThis.__piAllowedRootsCache = { roots: new Set([directory]), expiresAt: Date.now() + 60_000 };
+  // Browsable roots are per-user now, so register the fixture for this user.
+  allowFileRootForUser(testUser.userId, directory);
   const destination = path.join(directory, "important.txt");
   fs.writeFileSync(destination, "original contents");
   return { directory, destination };
@@ -34,7 +42,7 @@ async function upload(directory, strategy = "overwrite", names = ["important.txt
   const form = new FormData();
   for (const name of names) form.append("files", new File(["replacement"], name));
   return POST(new NextRequest(`http://localhost/api/files/${encoded}?type=upload&conflict=${strategy}`, {
-    method: "POST", headers: { host: "localhost" }, body: form,
+    method: "POST", headers: { authorization: testAuth, host: "localhost" }, body: form,
   }), { params: Promise.resolve({ path: encoded.split("/").map(decodeURIComponent) }) });
 }
 

@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import {
+  getSessionUiStatePath,
   readSessionUiState,
   SessionUiStateLockedError,
   updateSessionUiState,
 } from "@/lib/session-ui-state";
+import { requireAuth } from "@/lib/user-auth";
 import {
   parseSessionUiStateRequest,
   type SessionUiStateErrorResponse,
@@ -26,12 +28,25 @@ function refusal(status: number, reason: SessionUiStateRefusalReason, error: str
 }
 
 // GET /api/sessions/ui-state
-export async function GET() {
-  return NextResponse.json({ state: readSessionUiState() } satisfies SessionUiStateResponse, { headers: NO_STORE });
+//
+// The state file holds this user's pinned/archived session ids, so it lives in
+// their own agentDir and the route is scoped to them. It used to read the host
+// `agentDir` for everybody: any caller could see every user's sidebar, and
+// overwrite it.
+export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  return NextResponse.json(
+    { state: readSessionUiState(getSessionUiStatePath(auth.user.agentDir)) } satisfies SessionUiStateResponse,
+    { headers: NO_STORE },
+  );
 }
 
 // POST /api/sessions/ui-state - one change; answers with the state after it.
 export async function POST(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   if (!isApiRequestAllowed(req)) {
     return refusal(403, "request-denied", "Untrusted API request");
   }
@@ -52,7 +67,7 @@ export async function POST(req: Request) {
   if (!parsed.ok) return refusal(400, "invalid-request", parsed.error);
 
   try {
-    const state = await updateSessionUiState(parsed.request);
+    const state = await updateSessionUiState(parsed.request, getSessionUiStatePath(user.agentDir));
     return NextResponse.json({ state } satisfies SessionUiStateResponse, { headers: NO_STORE });
   } catch (error) {
     if (error instanceof SessionUiStateLockedError) return refusal(409, "locked", error.message);

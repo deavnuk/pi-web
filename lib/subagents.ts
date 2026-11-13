@@ -396,9 +396,9 @@ function readProfileDirectory(dir: string, scope: SubagentScope, cwd: string): S
     .filter((profile): profile is SubagentProfile => profile !== null);
 }
 
-function profileDirectories(cwd: string): Array<[string, Exclude<SubagentScope, "builtin">]> {
+function profileDirectories(cwd: string, agentDirOverride?: string): Array<[string, Exclude<SubagentScope, "builtin">]> {
   return [
-    [join(getAgentDir(), "agents"), "global"],
+    [join(agentDirOverride ?? getAgentDir(), "agents"), "global"],
     [join(resolve(cwd), ".agents", "agents"), "workspace"],
     [join(resolve(cwd), ".pi", "agents"), "project"],
   ];
@@ -420,25 +420,25 @@ function builtInProfiles(): SubagentProfile[] {
 }
 
 /** Every configured source, including profiles shadowed by a higher-precedence scope. */
-export function listSubagentProfileSources(cwd: string): SubagentProfile[] {
+export function listSubagentProfileSources(cwd: string, agentDirOverride?: string): SubagentProfile[] {
   const profiles = builtInProfiles();
-  for (const [dir, scope] of profileDirectories(cwd)) {
+  for (const [dir, scope] of profileDirectories(cwd, agentDirOverride)) {
     profiles.push(...readProfileDirectory(dir, scope, cwd));
   }
   return profiles.sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
-export function listSubagentProfiles(cwd: string): SubagentProfile[] {
+export function listSubagentProfiles(cwd: string, agentDirOverride?: string): SubagentProfile[] {
   // A same-name file replaces the built-in outright, its own `enabled` included.
   const byName = new Map(builtInProfiles().map((profile) => [profile.name.toLowerCase(), profile]));
-  for (const [dir, scope] of profileDirectories(cwd)) {
+  for (const [dir, scope] of profileDirectories(cwd, agentDirOverride)) {
     for (const profile of readProfileDirectory(dir, scope, cwd)) byName.set(profile.name.toLowerCase(), profile);
   }
   return [...byName.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
-export function resolveSubagentProfile(cwd: string, name: string): SubagentProfile | undefined {
-  return listSubagentProfiles(cwd).find((profile) => profile.name.toLowerCase() === name.trim().toLowerCase() && profile.enabled);
+export function resolveSubagentProfile(cwd: string, name: string, agentDirOverride?: string): SubagentProfile | undefined {
+  return listSubagentProfiles(cwd, agentDirOverride).find((profile) => profile.name.toLowerCase() === name.trim().toLowerCase() && profile.enabled);
 }
 
 function assertProfileName(name: string): string {
@@ -449,14 +449,14 @@ function assertProfileName(name: string): string {
   return normalized;
 }
 
-function writableProfileDirectory(cwd: string, scope: SubagentWritableScope): string {
-  if (scope === "global") return join(getAgentDir(), "agents");
+function writableProfileDirectory(cwd: string, scope: SubagentWritableScope, agentDirOverride?: string): string {
+  if (scope === "global") return join(agentDirOverride ?? getAgentDir(), "agents");
   if (scope === "project") return join(resolve(cwd), ".pi", "agents");
   throw new Error("Agent scope must be global or project");
 }
 
-function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScope): string {
-  const dir = writableProfileDirectory(cwd, scope);
+function assertWritableProfileDirectory(cwd: string, scope: SubagentWritableScope, agentDirOverride?: string): string {
+  const dir = writableProfileDirectory(cwd, scope, agentDirOverride);
   if (scope === "global") return dir;
 
   let existingAncestor = dir;
@@ -475,6 +475,7 @@ export function saveSubagentProfile(
   cwd: string,
   scope: SubagentWritableScope,
   profile: Omit<SubagentProfile, "scope" | "filePath">,
+  agentDirOverride?: string,
 ): SubagentProfile {
   const name = assertProfileName(profile.name);
   const tools = [...new Set(profile.tools.filter((tool) => BUILTIN_TOOLS.has(tool)))];
@@ -495,7 +496,7 @@ export function saveSubagentProfile(
   const loadSkills = profile.loadSkills === true;
   const loadExtensions = profile.loadExtensions === true;
   const promptMode = profile.promptMode === "replace" ? "replace" : "append";
-  const dir = assertWritableProfileDirectory(cwd, scope);
+  const dir = assertWritableProfileDirectory(cwd, scope, agentDirOverride);
   mkdirSync(dir, { recursive: true });
   if (scope === "project" && !isProjectProfilePathAllowed(cwd, dir)) {
     throw new Error("Agent profile directory is outside the project root");
@@ -561,9 +562,9 @@ export function saveSubagentProfile(
   };
 }
 
-export function deleteSubagentProfile(cwd: string, scope: SubagentWritableScope, name: string): void {
+export function deleteSubagentProfile(cwd: string, scope: SubagentWritableScope, name: string, agentDirOverride?: string): void {
   const safeName = assertProfileName(name);
-  const filePath = join(assertWritableProfileDirectory(cwd, scope), `${safeName}.md`);
+  const filePath = join(assertWritableProfileDirectory(cwd, scope, agentDirOverride), `${safeName}.md`);
   if (existsSync(filePath)) unlinkSync(filePath);
 }
 

@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 // The allowed roots come from the session catalogue, so point it at an empty
 // scratch agent directory instead of the user's real ~/.pi/agent.
@@ -24,10 +25,17 @@ const jiti = createJiti(import.meta.url, {
   moduleCache: false,
 });
 const { GET, POST } = await jiti.import("./[...path]/route.ts");
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
+
 const { GET: getFileIndex } = await jiti.import("../file-index/route.ts");
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
+const { allowFileRootForUser } = await jiti.import("../../../lib/allowed-roots.ts");
 const { encodeFilePathForApi } = await jiti.import("../../../lib/file-paths.ts");
 const { NextRequest } = await jiti.import("next/server");
+const { resolveAuthUser } = await jiti.import("../../../lib/user-auth.ts");
+const testUser = await resolveAuthUser(new Request("http://localhost/", { headers: { authorization: testAuth } }));
 
 function request(method, filePath, type, body, contentType = "application/json") {
   const encoded = encodeFilePathForApi(filePath);
@@ -35,8 +43,8 @@ function request(method, filePath, type, body, contentType = "application/json")
   const context = { params: Promise.resolve({ path: encoded.split("/").map(decodeURIComponent) }) };
   const handler = method === "GET" ? GET : POST;
   const init = body === undefined
-    ? { method, headers: { host: "localhost" } }
-    : { method, headers: { host: "localhost", "content-type": contentType }, body: JSON.stringify(body) };
+    ? { method, headers: { authorization: testAuth, host: "localhost" } }
+    : { method, headers: { authorization: testAuth, host: "localhost", "content-type": contentType }, body: JSON.stringify(body) };
   return handler(new NextRequest(url, init), context);
 }
 
@@ -68,7 +76,7 @@ function createHub(t) {
     }
     throw error;
   }
-  allowFileRoot(hub);
+  allowFileRootForUser(testUser.userId, hub);
   return { hub, elsewhere, second };
 }
 
@@ -169,7 +177,7 @@ test("a `..` carried inside an encoded segment cannot climb out through a link",
   // `%2F` survives URL parsing, so the catch-all receives one decoded segment.
   const segments = [...encodeFilePathForApi(hub).split("/").map(decodeURIComponent), "linked/../beside.txt"];
   const response = await GET(
-    new NextRequest(`http://localhost/api/files/x?type=read`, { headers: { host: "localhost" } }),
+    new NextRequest(`http://localhost/api/files/x?type=read`, { headers: { authorization: testAuth, host: "localhost" } }),
     { params: Promise.resolve({ path: segments }) },
   );
   assert.equal(response.status, 403);
@@ -189,7 +197,7 @@ test("a cwd that climbs out through a link is refused by the other routes too", 
   const cwd = `${hub}${path.sep}linked${path.sep}..`;
   const response = await getFileIndex(new NextRequest(
     `http://localhost/api/file-index?cwd=${encodeURIComponent(cwd)}`,
-    { headers: { host: "localhost" } },
+    { headers: { authorization: testAuth, host: "localhost" } },
   ));
   assert.equal(response.status, 403);
 });

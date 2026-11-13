@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import { abortSubagent, getSubagentRun, steerSubagent } from "@/lib/rpc-manager";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   const { id } = await params;
   try {
     const run = await getSubagentRun(id);
@@ -21,6 +24,8 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   const { id } = await params;
   try {
     const body = await req.json() as { action?: unknown; message?: unknown };

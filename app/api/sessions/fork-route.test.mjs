@@ -3,8 +3,9 @@ import { appendFileSync, readFileSync, unlinkSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 const routeSource = await readFile(new URL("./[id]/fork/route.ts", import.meta.url), "utf8");
 const jiti = createJiti(import.meta.url, {
@@ -13,6 +14,16 @@ const jiti = createJiti(import.meta.url, {
   moduleCache: false,
 });
 const { POST: forkSession } = await jiti.import("./[id]/fork/route.ts");
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser, retarget } = await installTestUser();
+after(cleanupTestUser);
+
+/** Headers for a route call: multi-user is the only mode, so every request authenticates. */
+function authHeaders(extra = {}) {
+  return { authorization: testAuth, ...extra };
+}
+
 const { GET: getSessionList } = await jiti.import("./route.ts");
 const {
   getSessionListVersion,
@@ -31,6 +42,8 @@ async function scratchSession(t) {
   const previousRegistry = globalThis.__piSessions;
   process.env.PI_CODING_AGENT_DIR = dir;
   process.env.HOME = join(dir, "home");
+  // The fixture account adopts the host agentDir, resolved from this variable.
+  retarget();
   invalidateSessionListCache();
   const manager = SessionManager.create(join(dir, "project"), join(dir, "sessions", "project"));
   const u1 = manager.appendMessage({ role: "user", content: "Fork me", timestamp: Date.now() });
@@ -45,6 +58,7 @@ async function scratchSession(t) {
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
+    retarget();
     for (const sessionId of [id, ...forked]) invalidateSessionPathCache(sessionId);
     invalidateSessionListCache();
     await rm(dir, { recursive: true, force: true });
@@ -56,7 +70,11 @@ const JSON_HEADERS = { host: "localhost", "Content-Type": "application/json" };
 
 function post(id, headers = JSON_HEADERS) {
   return forkSession(
-    new Request(`http://localhost/api/sessions/${id}/fork`, { method: "POST", headers, body: "{}" }),
+    new Request(`http://localhost/api/sessions/${id}/fork`, {
+      method: "POST",
+      headers: authHeaders(headers),
+      body: "{}",
+    }),
     { params: Promise.resolve({ id }) },
   );
 }
@@ -100,7 +118,7 @@ test("forks an idle session on disk without starting it, and the copy is a row o
   assert.deepEqual(assistantTexts(body.session.path), ["second"]);
   assert.equal(globalThis.__piSessions?.has(source.id) ?? false, false);
 
-  const list = await (await getSessionList(new Request("http://localhost/api/sessions"))).json();
+  const list = await (await getSessionList(new Request("http://localhost/api/sessions", { headers: authHeaders() }))).json();
   const listed = list.sessions.find((session) => session.id === body.sessionId);
   assert.ok(listed, "the list has the copy");
   assert.equal(listed.modified, body.session.modified, "the row does not move when the list replaces it");

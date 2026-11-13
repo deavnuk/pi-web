@@ -8,16 +8,19 @@ import { rememberProviderModels } from "./deferred-provider-models";
 /**
  * ModelRuntime that also includes providers registered by extensions (an
  * extension that calls `registerProvider` / `createProvider` during resource
- * loading). A bare `ModelRuntime.create()` only knows built-in providers plus
- * models.json, so extension-registered providers were invisible to the
- * provider-listing and auth routes.
+ * loading). A bare `createModelRuntimeWithExtensions()` only knows built-in
+ * providers plus models.json, so extension-registered providers were invisible
+ * to the provider-listing and auth routes.
  *
  * The agent dir acts as cwd so project-local extensions stay out; global
  * package extensions always load. Not cached: these routes need fresh
  * credentials for auth status and login/logout to be truthful.
+ *
+ * In multi-user mode (multiuser), pass the per-user agent dir so credentials
+ * and model catalogs resolve against that user's own auth.json/models.json.
  */
-export async function createModelRuntimeWithExtensions(): Promise<ModelRuntime> {
-  const agentDir = getAgentDir();
+export async function createModelRuntimeWithExtensions(userAgentDir?: string): Promise<ModelRuntime> {
+  const agentDir = userAgentDir || getAgentDir();
   const services = await createAgentSessionServices({ cwd: agentDir, agentDir });
   await rememberProviderModels(services.modelRuntime);
   return services.modelRuntime;

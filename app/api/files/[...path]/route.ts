@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import {
-  allowFileRoot,
+  allowFileRootForUser,
   getAllowedFileRoots,
   isExistingFilePathAllowed,
   isFilePathAllowed,
 } from "@/lib/file-access";
+import { requireAuth, type UserContext } from "@/lib/user-auth";
 import { checkLinkedDirectoryApproval, withOutsideLinkTargets } from "@/lib/linked-directory";
 import {
   DOCX_PREVIEW_MAX_BYTES,
@@ -70,11 +71,12 @@ function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
 }
 
-async function getUploadDirectory(segments: string[]): Promise<
-  { directory: string } | { response: NextResponse }
-> {
+async function getUploadDirectory(
+  segments: string[],
+  user: UserContext | null,
+): Promise<{ directory: string } | { response: NextResponse }> {
   const directory = filePathFromApiSegments(segments);
-  const allowedRoots = await getAllowedFileRoots();
+  const allowedRoots = await getAllowedFileRoots(user);
   if (!isFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
@@ -113,6 +115,7 @@ async function getUploadDirectory(segments: string[]): Promise<
 async function allowLinkedDirectory(
   request: NextRequest,
   segments: string[],
+  user: UserContext | null,
 ): Promise<NextResponse> {
   if (!hasJsonContentType(request)) {
     return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
@@ -124,12 +127,16 @@ async function allowLinkedDirectory(
   const approval = checkLinkedDirectoryApproval(
     filePathFromApiSegments(segments),
     body.target,
-    await getAllowedFileRoots(),
+    await getAllowedFileRoots(user),
   );
   if (!approval.ok) {
     return NextResponse.json({ error: approval.error }, { status: approval.status });
   }
-  if (!approval.alreadyAllowed) allowFileRoot(approval.target);
+  if (!approval.alreadyAllowed) {
+    // Scoped to the approving user: a link one user accepted must not widen
+    // every other user's browsable roots.
+    if (user) allowFileRootForUser(user.userId, approval.target);
+  }
   return NextResponse.json({ path: approval.target });
 }
 
@@ -146,12 +153,16 @@ export async function POST(
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }
 
+  const auth = await requireAuth(request);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
+
   try {
     const { path: segments } = await params;
     const type = request.nextUrl.searchParams.get("type") ?? "upload";
-    if (type === "allow-link") return allowLinkedDirectory(request, segments);
+    if (type === "allow-link") return allowLinkedDirectory(request, segments, user);
 
-    const uploadDirectory = await getUploadDirectory(segments);
+    const uploadDirectory = await getUploadDirectory(segments, user);
     if ("response" in uploadDirectory) return uploadDirectory.response;
     const { directory } = uploadDirectory;
 
@@ -439,6 +450,10 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
 ) {
+  const auth = await requireAuth(request);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
+
   try {
     const { path: segments } = await params;
     const filePath = filePathFromApiSegments(segments);
@@ -458,12 +473,12 @@ export async function GET(
     }
     const sessionId = request.nextUrl.searchParams.get("sessionId");
 
-    const allowedRoots = await getAllowedFileRoots();
+    const allowedRoots = await getAllowedFileRoots(user);
     const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
     const allowedBySessionReference =
       !allowedByRoot &&
       type !== "list" &&
-      await isFilePathReferencedBySession(filePath, sessionId);
+      await isFilePathReferencedBySession(filePath, sessionId, user?.agentDir);
     if (!allowedByRoot && !allowedBySessionReference) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }

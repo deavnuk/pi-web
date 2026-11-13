@@ -169,6 +169,30 @@ export function AppShell() {
       return ids;
     });
   }, []);
+  // Current signed-in identity (multi-user mode). Null in single-user mode.
+  const [currentUser, setCurrentUser] = useState<{
+    username: string;
+    displayName?: string;
+    role: string;
+    multiUser: boolean;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/user/me")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.user && data.user.username !== "pi") {
+          setCurrentUser({
+            username: data.user.username,
+            displayName: data.user.displayName,
+            role: data.user.role,
+            multiUser: Boolean(data.multiUser),
+          });
+        }
+      })
+      .catch(() => { /* identity badge is best-effort */ });
+    return () => { cancelled = true; };
+  }, []);
   // The temporary id distinguishes consecutive fresh composers in one cwd.
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [newSessionDraftId, setNewSessionDraftId] = useState("initial");
@@ -1360,6 +1384,7 @@ export function AppShell() {
         {([
           ["models", translate("common.models")],
           ["skills", translate("common.skills")],
+          ["mcp", translate("common.mcp")],
         ] as const).map(([section, label]) => {
           const disabled = settingsSectionRequiresProject(section) && !projectTrustCwd;
           return (
@@ -1454,6 +1479,90 @@ export function AppShell() {
         </svg>
         <span>{translate("trust.resourcesNotLoaded")}</span>
       </button>
+    );
+  };
+
+  const handleLogout = useCallback(async () => {
+    if (!window.confirm(translate("common.logoutConfirm"))) return;
+    // Basic auth has no server session — overwrite the browser's cached
+    // credentials with invalid ones; the next API call re-prompts.
+    try {
+      await fetch("/api/logout", {
+        headers: { Authorization: `Basic ${btoa("logout:logout")}` },
+        cache: "no-store",
+      });
+    } catch { /* best-effort */ }
+    window.location.href = "/";
+  }, [translate]);
+
+  const renderLogoutButton = (mobile: boolean) => {
+    if (!currentUser?.multiUser) return null;
+    return (
+      <button
+        type="button"
+        onClick={handleLogout}
+        title={translate("common.logout")}
+        aria-label={translate("common.logout")}
+        data-mobile-toolbar-action={mobile ? "logout" : undefined}
+        style={{
+          display: "flex", alignItems: "center", gap: 4,
+          height: TOP_BAR_ICON_BUTTON_SIZE, padding: "0 8px",
+          border: "none", borderRight: "1px solid var(--border)",
+          background: "none", color: "var(--text-muted)",
+          fontSize: 12, cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
+        }}
+        onMouseEnter={(event) => { event.currentTarget.style.color = "var(--text)"; }}
+        onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text-muted)"; }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+          <polyline points="16 17 21 12 16 7" />
+          <line x1="21" y1="12" x2="9" y2="12" />
+        </svg>
+      </button>
+    );
+  };
+
+  const renderUserBadge = (mobile: boolean) => {
+    if (!currentUser?.multiUser) return null;
+    const label = currentUser.displayName || currentUser.username;
+    return (
+      <a
+        href={currentUser.role === "admin" ? "/admin" : undefined}
+        title={
+          currentUser.role === "admin"
+            ? `${label} · 管理员 — 打开管理后台`
+            : `${label} · ${currentUser.role}`
+        }
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          height: TOP_BAR_ICON_BUTTON_SIZE, padding: "0 10px",
+          border: "none", borderRight: "1px solid var(--border)",
+          background: "none", color: "var(--text-muted)",
+          fontSize: 12, fontWeight: 500, cursor: currentUser.role === "admin" ? "pointer" : "default",
+          textDecoration: "none", flexShrink: 0, transition: "color 0.12s",
+        }}
+        onMouseEnter={(event) => {
+          if (currentUser.role === "admin") event.currentTarget.style.color = "var(--text)";
+        }}
+        onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text-muted)"; }}
+        data-mobile-toolbar-action={mobile ? "user" : undefined}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+          <circle cx="12" cy="7" r="4" />
+        </svg>
+        <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {label}
+        </span>
+        {currentUser.role === "admin" && (
+          <span style={{
+            fontSize: 10, padding: "1px 5px", borderRadius: 6,
+            background: "color-mix(in srgb, var(--accent, #6366f1) 18%, transparent)",
+            color: "var(--accent, #6366f1)", fontWeight: 600,
+          }}>admin</span>
+        )}
+      </a>
     );
   };
 
@@ -2166,6 +2275,8 @@ export function AppShell() {
                 </button>
               )}
               {!isNarrowMobile && renderChatToolbarActions(true)}
+              {renderUserBadge(true)}
+              {renderLogoutButton(true)}
               {renderSessionStatsButton(true)}
               {renderMainFileToggle(true)}
               {isNarrowMobile && mobileToolbarMoreOpen && (
@@ -2197,6 +2308,8 @@ export function AppShell() {
             <>
               {renderProjectTrustWarning(false)}
               {renderChatToolbarActions(false)}
+              {renderUserBadge(false)}
+              {renderLogoutButton(false)}
               {renderSessionStatsButton(false)}
             </>
           )}

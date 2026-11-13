@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { McpErrorResponse, McpTestResponse } from "@/lib/api-types";
 import { isMcpEntryRefusal, readConnectableMcpEntry } from "@/lib/mcp-entry-request";
 import { testMcpServer } from "@/lib/mcp-test";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -24,11 +25,18 @@ function errorMessage(error: unknown): string {
 // `cwd` is the panel's project: required for a project server, and the
 // folder a global stdio server runs in.
 export async function POST(req: Request) {
-  const entry = await readConnectableMcpEntry(req);
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const entry = await readConnectableMcpEntry(req, auth.user);
   if (isMcpEntryRefusal(entry)) return NextResponse.json(entry.body, { status: entry.status });
   const { scope, name, sourcePath, configKey, config, cwd, internals } = entry;
   try {
-    const result = await testMcpServer({ scope, name, sourcePath, configKey, config, cwd }, internals, { signal: req.signal });
+    const result = await testMcpServer(
+      { scope, name, sourcePath, configKey, config, cwd },
+      internals,
+      // The stdio server runs in the main process: put it in this user's sandbox.
+      { signal: req.signal, user: auth.user },
+    );
     return NextResponse.json({ scope, name, configKey, result } satisfies McpTestResponse);
   } catch (error) {
     return NextResponse.json({ error: errorMessage(error), reason: "internal" } satisfies McpErrorResponse, { status: 500 });

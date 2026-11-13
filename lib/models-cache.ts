@@ -56,22 +56,28 @@ export function withSafeModelLoadFailure(data: ModelsData): ModelsData {
   return { ...data, modelError: SAFE_MODEL_LOAD_FAILURE_MESSAGE };
 }
 
-export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsData>): Promise<ModelsData> {
+export function loadModelsWithCache(
+  cwd: string,
+  loader: () => Promise<ModelsData>,
+  cacheKeySuffix = "",
+): Promise<ModelsData> {
   const state = getModelsCacheState();
-  const cached = state.entries.get(cwd);
+  // Multi-user: key by user agentDir + cwd so users don't share model caches.
+  const cacheKey = cacheKeySuffix ? `${cacheKeySuffix}\u0000${cwd}` : cwd;
+  const cached = state.entries.get(cacheKey);
   if (cached) {
     if (cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
-    state.entries.delete(cwd);
+    state.entries.delete(cacheKey);
   }
 
-  const existingLoad = state.inFlight.get(cwd);
+  const existingLoad = state.inFlight.get(cacheKey);
   if (existingLoad) return existingLoad;
 
   const generation = state.generation;
   const loadPromise: Promise<ModelsData> = Promise.resolve()
     .then(loader)
     .then((data) => {
-      if (state.generation === generation && state.inFlight.get(cwd) === loadPromise) {
+      if (state.generation === generation && state.inFlight.get(cacheKey) === loadPromise) {
         const now = Date.now();
         for (const [key, entry] of state.entries) {
           if (entry.expiresAt <= now) state.entries.delete(key);
@@ -81,14 +87,14 @@ export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsDat
           if (oldestKey === undefined) break;
           state.entries.delete(oldestKey);
         }
-        state.entries.set(cwd, { data, expiresAt: now + MODELS_CACHE_TTL_MS });
+        state.entries.set(cacheKey, { data, expiresAt: now + MODELS_CACHE_TTL_MS });
       }
       return data;
     })
     .finally(() => {
-      if (state.inFlight.get(cwd) === loadPromise) state.inFlight.delete(cwd);
+      if (state.inFlight.get(cacheKey) === loadPromise) state.inFlight.delete(cacheKey);
     });
 
-  state.inFlight.set(cwd, loadPromise);
+  state.inFlight.set(cacheKey, loadPromise);
   return loadPromise;
 }

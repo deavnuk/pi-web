@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
+import { requireAuth } from "@/lib/user-auth";
 import path from "path";
 import {
   getAllowedFileRoots,
@@ -108,6 +109,8 @@ function listWithWalk(cwd: string): FileListing {
 // matching, like the TUI passing the query to fd).
 // Guarded by the same allow-list as /api/files.
 export async function GET(req: NextRequest) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
     const cwd = req.nextUrl.searchParams.get("cwd")?.trim() ?? "";
     if (!cwd || (!cwd.startsWith("/") && !isWindowsAbsolutePath(cwd))) {
@@ -115,7 +118,7 @@ export async function GET(req: NextRequest) {
     }
     const query = req.nextUrl.searchParams.get("q")?.slice(0, MAX_QUERY_LENGTH) ?? "";
 
-    const allowedRoots = await getAllowedFileRoots();
+    const allowedRoots = await getAllowedFileRoots(auth.user);
     if (!isFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }

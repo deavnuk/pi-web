@@ -2,9 +2,12 @@ import { NextResponse } from "next/server";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { existsSync } from "fs";
 import { randomUUID } from "crypto";
-import { allowFileRoot } from "@/lib/file-access";
+import { allowFileRootForUser } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { startRpcSession } from "@/lib/rpc-manager";
+import { requireAuth } from "@/lib/user-auth";
+import { isPathWithinRoots } from "@/lib/path-security";
+import { getAllowedFileRoots } from "@/lib/file-access";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -20,6 +23,10 @@ function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
 // type:"ensure_session" only creates the runtime so clients can query commands.
 // Returns pi's real session id plus the model/thinking state selected at startup.
 export async function POST(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
+
   let commandType: string | undefined;
   let promptAccepted = false;
   try {
@@ -44,6 +51,14 @@ export async function POST(req: Request) {
       }, { status: 400 });
     }
 
+    // Multi-user: the cwd must be within the user's browsable roots.
+    if (user) {
+      const allowed = await getAllowedFileRoots(user);
+      if (!isPathWithinRoots(cwd, allowed)) {
+        return NextResponse.json({ error: "Directory not allowed for this user" }, { status: 403 });
+      }
+    }
+
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
     const { provider, modelId, toolNames, thinkingLevel, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: unknown; [key: string]: unknown };
     if ((provider && !modelId) || (!provider && modelId)) {
@@ -56,6 +71,7 @@ export async function POST(req: Request) {
     // requests in the same millisecond, merging two new sessions into one.
     const tempKey = `__new__${randomUUID()}`;
     const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, {
+      ...(user ? { user } : {}),
       ...(toolNames ? { toolNames } : {}),
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
@@ -64,7 +80,9 @@ export async function POST(req: Request) {
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
     // in sync so the new cwd is immediately readable via /api/files. Without this,
     // a file request under a brand-new cwd would 403 for up to the cache TTL.
-    allowFileRoot(cwd);
+    // Scoped to the owner: a cwd one user works in must not become browsable for
+    // every other user.
+    if (user) allowFileRootForUser(user.userId, cwd);
     invalidateSessionListCache();
 
     const state = await session.send({ type: "get_state" }) as {

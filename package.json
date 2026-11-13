@@ -44,7 +44,9 @@
     "lint": "eslint .",
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",
+    "test:e2e:multiuser": "node e2e/multiuser.mjs",
     "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\"",
+    "test:sandbox": "node --experimental-strip-types --test lib/user-sandbox.test.mjs lib/user-sandbox-roots.test.mjs lib/sandbox-architecture.test.mjs app/api/terminal/route.test.mjs app/api/sessions/isolation.test.mjs lib/allowed-roots.test.mjs",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {

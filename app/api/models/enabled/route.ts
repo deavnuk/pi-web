@@ -1,6 +1,6 @@
 import { stat } from "fs/promises";
 import { resolve } from "path";
-import { getAgentDir, SettingsManager, type ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, type ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   clearEnabledModels,
@@ -26,6 +26,7 @@ import { createModelRuntimeWithExtensions } from "@/lib/model-runtime";
 import { withDeferredProviderModels } from "@/lib/deferred-provider-models";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { invalidateModelsCache } from "@/lib/models-cache";
+import { requireAuth, type UserContext } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -37,9 +38,8 @@ interface RequestContext {
   paths: { cwd: string; agentDir: string };
 }
 
-async function loadContext(cwd: string): Promise<RequestContext> {
+async function loadContext(cwd: string, agentDir: string): Promise<RequestContext> {
   const modelRuntime = withDeferredProviderModels(await createModelRuntimeWithExtensions());
-  const agentDir = getAgentDir();
   return {
     modelRuntime,
     models: await modelRuntime.getAvailable(),
@@ -71,7 +71,7 @@ async function buildView(context: RequestContext): Promise<EnabledModelsView> {
  * shadowed. It is only read, never written, but it still points at a settings
  * file, so it goes through the same allow-list as `/api/files`.
  */
-async function resolveCwd(raw: string | null): Promise<{ cwd: string } | { error: Response }> {
+async function resolveCwd(raw: string | null, user: UserContext): Promise<{ cwd: string } | { error: Response }> {
   if (!raw) return { cwd: process.cwd() };
   const cwd = resolve(raw);
   let cwdStat;
@@ -83,7 +83,7 @@ async function resolveCwd(raw: string | null): Promise<{ cwd: string } | { error
   if (!cwdStat.isDirectory()) {
     return { error: Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 }) };
   }
-  const allowedRoots = await getAllowedFileRoots();
+  const allowedRoots = await getAllowedFileRoots(user);
   if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
     return { error: Response.json({ error: "Access denied" }, { status: 403 }) };
   }
@@ -91,11 +91,13 @@ async function resolveCwd(raw: string | null): Promise<{ cwd: string } | { error
 }
 
 export async function GET(req: Request) {
-  const resolved = await resolveCwd(new URL(req.url).searchParams.get("cwd"));
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const resolved = await resolveCwd(new URL(req.url).searchParams.get("cwd"), auth.user);
   if ("error" in resolved) return resolved.error;
 
   try {
-    return Response.json(await buildView(await loadContext(resolved.cwd)));
+    return Response.json(await buildView(await loadContext(resolved.cwd, auth.user.agentDir)));
   } catch (error) {
     return Response.json({ error: String(error) }, { status: 500 });
   }
@@ -179,6 +181,8 @@ function samePatternList(a: string[] | undefined, b: string[] | undefined): bool
 }
 
 export async function PUT(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   let body: EnabledModelsRequest;
   try {
     body = await req.json() as EnabledModelsRequest;
@@ -199,11 +203,11 @@ export async function PUT(req: Request) {
     return Response.json({ error: "Invalid cwd" }, { status: 400 });
   }
 
-  const resolved = await resolveCwd(typeof body.cwd === "string" ? body.cwd : null);
+  const resolved = await resolveCwd(typeof body.cwd === "string" ? body.cwd : null, auth.user);
   if ("error" in resolved) return resolved.error;
 
   try {
-    const context = await loadContext(resolved.cwd);
+    const context = await loadContext(resolved.cwd, auth.user.agentDir);
     const { patterns, scope } = readEnabledModelsSettings(context.settingsManager, context.paths);
     if (scope === "project") {
       return Response.json(

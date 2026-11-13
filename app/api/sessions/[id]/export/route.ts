@@ -7,6 +7,7 @@ import { promisify } from "util";
 import { fileURLToPath, pathToFileURL } from "url";
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
+import { requireAuth } from "@/lib/user-auth";
 
 const execFileAsync = promisify(execFile);
 
@@ -245,8 +246,14 @@ export async function GET(
   const { id } = await params;
   const inline = new URL(req.url).searchParams.get("inline") === "1";
 
+  // Session exports contain full transcripts, so they must be scoped to the
+  // authenticated owner (multi-user). Without this, any caller could export
+  // another user's session by id.
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+
   try {
-    const filePath = await resolveSessionPath(id);
+    const filePath = await resolveSessionPath(id, auth.user?.agentDir);
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stat } from "fs/promises";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { requireAuth } from "@/lib/user-auth";
 import {
   createDirectory,
   getBrowseStartDirectory,
@@ -13,6 +14,11 @@ import {
 
 // GET /api/cwd/browse?path=...：列出文件系统中的可读子目录。
 export async function GET(request: NextRequest) {
+  // Lists directories anywhere on the host, so it is at least the caller's
+  // identity that gates it. The allowed-roots check for the *chosen* path
+  // happens when it is registered (`/api/cwd/validate`).
+  const auth = await requireAuth(request);
+  if ("response" in auth) return auth.response;
   try {
     const requested = request.nextUrl.searchParams.get("path")?.trim();
 
@@ -54,6 +60,10 @@ export async function GET(request: NextRequest) {
 // POST /api/cwd/browse  body: { path: string, name: string }
 // Creates one direct child of the currently browsed directory.
 export async function POST(request: Request) {
+  // Creates a directory anywhere the server can write, so it must not be
+  // reachable without an account.
+  const auth = await requireAuth(request);
+  if ("response" in auth) return auth.response;
   if (!isApiRequestAllowed(request)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }

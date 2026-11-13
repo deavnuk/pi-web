@@ -5,6 +5,7 @@ export const SETTINGS_SECTION_VALUES = [
   "agents",
   "plugins",
   "mcp",
+  "schedules",
 ] as const;
 
 export type SettingsSection = (typeof SETTINGS_SECTION_VALUES)[number];
@@ -13,6 +14,7 @@ export type SettingsDetailSection = Exclude<SettingsSection, "general">;
 const STORAGE_KEY = "pi-web:settings-navigation";
 // Sections that need a project to show anything. Settings › MCP is not one: it
 // lists the global mcp.json without a project and adds a Project group with one.
+// "schedules" is per-user, not per-project, so it stays available with no cwd.
 const PROJECT_SECTIONS = new Set<SettingsSection>(["skills", "agents", "plugins"]);
 
 /** Whether a section is unavailable until a project is open. */

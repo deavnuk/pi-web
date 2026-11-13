@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
+import { requireAuth } from "@/lib/user-auth";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "@/lib/tool-result-images";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -52,8 +53,11 @@ export async function GET(
     return NextResponse.json({ error: "Valid blockIndex is required" }, { status: 400 });
   }
 
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+
   try {
-    const filePath = await resolveSessionPath(id);
+    const filePath = await resolveSessionPath(id, auth.user?.agentDir);
     if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
 
     const entry = getSessionEntries(filePath).find((candidate) => candidate.id === entryId);

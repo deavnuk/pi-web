@@ -2,10 +2,14 @@ import { NextResponse } from "next/server";
 import type { PluginScope } from "@/lib/api-types";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { checkPluginUpdates } from "@/lib/plugin-updates";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   try {
     const body = await req.json() as {
       cwd?: unknown;
@@ -14,7 +18,7 @@ export async function POST(req: Request) {
     };
     const cwd = typeof body.cwd === "string" ? body.cwd : "";
     if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
-    const allowedRoots = await getAllowedFileRoots();
+    const allowedRoots = await getAllowedFileRoots(user);
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }

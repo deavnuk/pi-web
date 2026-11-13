@@ -4,6 +4,20 @@ export const PI_WEB_AUTH_USERNAME = "pi";
 export const PI_WEB_SESSION_COOKIE = "pi_web_session";
 export const PI_WEB_SESSION_MAX_AGE = 60 * 60 * 24 * 30;
 
+/**
+ * The Basic-auth realm stamped on every 401.
+ *
+ * Browsers key their cached Basic credentials by (origin, realm). Logout works
+ * by overwriting that cache entry with deliberately invalid credentials, so
+ * this string MUST be byte-identical everywhere — a 401 carrying a *different*
+ * realm populates a separate cache slot and leaves the real credentials intact,
+ * making sign-out look like it did nothing.
+ */
+export const PI_WEB_AUTH_REALM = "Pi Web";
+
+/** `WWW-Authenticate` value for a Basic-auth challenge on this realm. */
+export const PI_WEB_AUTH_CHALLENGE = `Basic realm="${PI_WEB_AUTH_REALM}", charset="UTF-8"`;
+
 function hashSecret(value: string): Buffer {
   return createHash("sha256").update(value, "utf8").digest();
 }

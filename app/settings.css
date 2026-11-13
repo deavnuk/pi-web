@@ -2501,3 +2501,142 @@ select.mcp-add-input {
     }
   }
 }
+
+/* --------------------------------------------------------------------------- */
+/* Scheduled tasks (Settings → 定时任务)                                        */
+/* --------------------------------------------------------------------------- */
+
+.schedules-embedded {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.schedules-sidebar-title {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedules-sidebar-meta {
+  display: block;
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedules-sidebar-hint {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.schedules-prompt {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.schedules-history {
+  margin-top: 4px;
+}
+
+.schedules-history-title {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.schedules-run-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.schedules-run-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.schedules-run-item:last-child {
+  border-bottom: none;
+}
+
+.schedules-run-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.schedules-run-time.dim {
+  color: var(--text-dim);
+}
+
+.schedules-run-status {
+  color: var(--text-muted);
+}
+
+.schedules-run-status.is-ok {
+  color: #34d399;
+}
+
+.schedules-run-status.is-error,
+.schedules-run-status.is-timeout {
+  color: #f87171;
+}
+
+.schedules-run-status.is-skipped {
+  color: #fbbf24;
+}
+
+.schedules-run-link {
+  margin-left: auto;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.schedules-run-link:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.schedules-run-error {
+  flex-basis: 100%;
+  color: #f87171;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}

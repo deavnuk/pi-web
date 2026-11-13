@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "pi-web-skills-route-"));
 const agentDir = join(root, "agent");
@@ -12,6 +13,11 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
 const { PATCH } = await jiti.import("./route.ts");
+
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -29,7 +35,7 @@ async function writeSkill(dir, name, frontmatter = "") {
 function patchSkills(body) {
   return PATCH(new Request("http://localhost/api/skills", {
     method: "PATCH",
-    headers: { "content-type": "application/json" },
+    headers: { authorization: testAuth, "content-type": "application/json" },
     body: JSON.stringify(body),
   }));
 }

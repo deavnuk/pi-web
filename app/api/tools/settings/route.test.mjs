@@ -2,12 +2,19 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../../__tests__/test-user.mjs";
 
 const agentDir = await mkdtemp(path.join(os.tmpdir(), "pi-web-tool-settings-route-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
+
+// Multi-user is the only mode: tool settings are per account, stored in the
+// caller's own agentDir (the fixture adopts PI_CODING_AGENT_DIR).
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
+
 test.after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
@@ -24,7 +31,13 @@ const { GET, PUT } = await jiti.import("./route.ts");
 const settingsPath = path.join(agentDir, "settings.json");
 const isWindows = process.platform === "win32";
 
-function put(body, headers = { host: "localhost", "Content-Type": "application/json" }) {
+const AUTH = { host: "localhost", authorization: testAuth };
+
+function get() {
+  return GET(new Request("http://localhost/api/tools/settings", { headers: AUTH }));
+}
+
+function put(body, headers = { ...AUTH, "Content-Type": "application/json" }) {
   return PUT(new Request("http://localhost/api/tools/settings", {
     method: "PUT",
     headers,
@@ -34,7 +47,7 @@ function put(body, headers = { host: "localhost", "Content-Type": "application/j
 
 test("reports and switches Code mode on every platform", async () => {
   await writeFile(settingsPath, JSON.stringify({ defaultModel: "m" }));
-  const initial = await GET();
+  const initial = await get();
   assert.equal(initial.status, 200);
   assert.deepEqual(await initial.json(), { isWindows, powerShellEnabled: false, codemode: "automatic", codemodeMode: { value: "on" }, codemodeInlineBudget: {} });
 
@@ -89,7 +102,7 @@ test("saves the Code mode mode, and \"on\" gives sessions pi's default again", a
 
   // A value that is neither mode is reported as pi reads it.
   await writeFile(settingsPath, JSON.stringify({ codemode: { mode: "never" } }));
-  assert.deepEqual((await (await GET()).json()).codemodeMode, { value: "on", invalid: '"never"' });
+  assert.deepEqual((await (await get()).json()).codemodeMode, { value: "on", invalid: '"never"' });
 
   // A codemode that is not an object is refused, not replaced.
   await writeFile(settingsPath, JSON.stringify({ codemode: "only" }));
@@ -121,9 +134,9 @@ test("rejects requests that do not name exactly one valid change, with a reason 
     assert.equal(response.status, 400, JSON.stringify(body));
     assert.equal((await response.json()).reason, "invalid-request", JSON.stringify(body));
   }
-  const plain = await put({ codemode: "always" }, { host: "localhost", "Content-Type": "text/plain" });
+  const plain = await put({ codemode: "always" }, { ...AUTH, "Content-Type": "text/plain" });
   assert.deepEqual([plain.status, await plain.json()], [415, { error: "Content-Type must be application/json", reason: "content-type" }]);
-  const foreign = await put({ codemode: "always" }, { host: "localhost", origin: "https://evil.example", "Content-Type": "application/json" });
+  const foreign = await put({ codemode: "always" }, { ...AUTH, origin: "https://evil.example", "Content-Type": "application/json" });
   assert.deepEqual([foreign.status, await foreign.json()], [403, { error: "Untrusted API request", reason: "request-denied" }]);
 });
 
@@ -135,7 +148,7 @@ test("keeps the PowerShell switch Windows-only", { skip: isWindows }, async () =
 
 test("reports a settings file it cannot parse instead of overwriting it", async () => {
   await writeFile(settingsPath, "{ not json");
-  const read = await GET();
+  const read = await get();
   assert.equal(read.status, 500);
   assert.equal((await read.json()).reason, "internal");
   const write = await put({ codemode: "always" });

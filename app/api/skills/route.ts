@@ -7,6 +7,7 @@ import type { SkillToggleResult } from "@/lib/api-types";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { setDisableModelInvocation } from "@/lib/skill-frontmatter";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { requireAuth } from "@/lib/user-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -14,27 +15,33 @@ export const dynamic = "force-dynamic";
 // Uses DefaultResourceLoader (same logic as AgentSession startup) so settings.json
 // skill paths, package skills, and .agents/skills directories are all included.
 export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
+
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
   if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
 
   try {
-    const allowedRoots = await getAllowedFileRoots();
+    const agentDir = user?.agentDir ?? getAgentDir();
+    const allowedRoots = await getAllowedFileRoots(user);
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
-    return NextResponse.json(await loadSkillsWithInstallInfo(cwd));
+    return NextResponse.json(await loadSkillsWithInstallInfo(cwd, agentDir));
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
 }
 
-async function getSkillEditRoots(): Promise<Set<string>> {
-  const allowedRoots = new Set(await getAllowedFileRoots());
-  allowedRoots.add(getAgentDir());
+async function getSkillEditRoots(user: Parameters<typeof getAllowedFileRoots>[0]): Promise<Set<string>> {
+  const agentDir = user?.agentDir ?? getAgentDir();
+  const allowedRoots = new Set(await getAllowedFileRoots(user));
+  allowedRoots.add(agentDir);
   // Globally installed skills live in ~/.agents/skills and are symlinked into
   // the agent's skills dir; isExistingFilePathAllowed resolves the symlink, so
-  // the real target sits outside getAgentDir(). Allow the global skills root
+  // the real target sits outside the agentDir. Allow the global skills root
   // too (the SDK always treats ~/.agents/skills as trusted).
   const globalSkillsDir = path.join(homedir(), ".agents", "skills");
   if (existsSync(globalSkillsDir)) allowedRoots.add(globalSkillsDir);
@@ -67,6 +74,9 @@ function toggleSkillFile(
 // "Disable all". A batch edits each file on its own and reports every one, so
 // a skill the route refuses does not stop the rest.
 export async function PATCH(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   try {
     const body = await req.json() as {
       filePath?: string;
@@ -82,7 +92,7 @@ export async function PATCH(req: Request) {
       if (typeof disableModelInvocation !== "boolean") {
         return NextResponse.json({ error: "disableModelInvocation must be a boolean" }, { status: 400 });
       }
-      const allowedRoots = await getSkillEditRoots();
+      const allowedRoots = await getSkillEditRoots(user);
       const results: SkillToggleResult[] = [];
       for (const target of new Set(filePaths as string[])) {
         try {
@@ -96,7 +106,7 @@ export async function PATCH(req: Request) {
     }
 
     if (!filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
-    const refused = toggleSkillFile(filePath, disableModelInvocation, await getSkillEditRoots());
+    const refused = toggleSkillFile(filePath, disableModelInvocation, await getSkillEditRoots(user));
     if (refused) return NextResponse.json({ error: refused.error }, { status: refused.status });
     return NextResponse.json({ success: true });
   } catch (e) {

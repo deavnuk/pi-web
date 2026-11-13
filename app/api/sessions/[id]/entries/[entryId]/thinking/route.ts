@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
+import { requireAuth } from "@/lib/user-auth";
 
 export async function GET(
   req: Request,
@@ -12,8 +13,11 @@ export async function GET(
     return NextResponse.json({ error: "Valid blockIndex is required" }, { status: 400 });
   }
 
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+
   try {
-    const filePath = await resolveSessionPath(id);
+    const filePath = await resolveSessionPath(id, auth.user?.agentDir);
     if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
 
     // SessionManager-backed parsing preserves the SDK's malformed-line tolerance.

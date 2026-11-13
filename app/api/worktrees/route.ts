@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { addWorktree, findCurrentWorktreePath, listWorktrees, removeWorktree, resolveProject, worktreeRemovalRequiresForce } from "@/lib/worktree";
-import { allowFileRoot, getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
+import { allowFileRootForUser, getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
+import { requireAuth, type UserContext } from "@/lib/user-auth";
 
 /** Same gate as /api/files: only session cwds / project roots / explicitly
  *  allowed dirs may be inspected or mutated through this endpoint. */
-async function checkCwdAllowed(cwd: string): Promise<NextResponse | null> {
-  const allowedRoots = await getAllowedFileRoots();
+async function checkCwdAllowed(cwd: string, user: UserContext | null): Promise<NextResponse | null> {
+  const allowedRoots = await getAllowedFileRoots(user);
   if (!isFilePathAllowed(cwd, allowedRoots) || !isExistingFilePathAllowed(cwd, allowedRoots)) {
     return NextResponse.json({ error: "Access denied" }, { status: 403 });
   }
@@ -16,12 +17,14 @@ async function checkCwdAllowed(cwd: string): Promise<NextResponse | null> {
 
 // GET /api/worktrees?cwd=  →  { projectRoot, projectKey, isGit, isTopLevel, currentWorktreePath, worktrees }
 export async function GET(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
     const cwd = new URL(req.url).searchParams.get("cwd");
     if (!cwd) {
       return NextResponse.json({ error: "cwd is required" }, { status: 400 });
     }
-    const denied = await checkCwdAllowed(cwd);
+    const denied = await checkCwdAllowed(cwd, auth.user);
     if (denied) return denied;
 
     const project = await resolveProject(cwd);
@@ -39,7 +42,9 @@ export async function GET(req: Request) {
     // Every listed path is a git-verified worktree of this project; allow the
     // file explorer to browse them even before they have any session (the
     // in-memory allowlist from addWorktree does not survive server restarts).
-    for (const w of worktrees) allowFileRoot(w.path);
+    // Scoped to the requesting user: another user's worktrees must not become
+    // browsable here.
+    if (auth.user) for (const w of worktrees) allowFileRootForUser(auth.user.userId, w.path);
     return NextResponse.json({
       projectRoot: project.projectRoot,
       projectKey: projectIdentityKey(project.projectRoot),
@@ -55,6 +60,8 @@ export async function GET(req: Request) {
 
 // POST /api/worktrees  body: { cwd, branch }  →  { path, branch }
 export async function POST(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
     const body = await req.json() as { cwd?: string; branch?: string };
     if (!body.cwd || typeof body.cwd !== "string") {
@@ -63,13 +70,13 @@ export async function POST(req: Request) {
     if (!body.branch || typeof body.branch !== "string") {
       return NextResponse.json({ error: "branch is required" }, { status: 400 });
     }
-    const denied = await checkCwdAllowed(body.cwd);
+    const denied = await checkCwdAllowed(body.cwd, auth.user);
     if (denied) return denied;
     if (!existsSync(body.cwd)) {
       return NextResponse.json({ error: `Directory does not exist: ${body.cwd}` }, { status: 400 });
     }
 
-    const result = await addWorktree(body.cwd, body.branch);
+    const result = await addWorktree(body.cwd, body.branch, auth.user?.userId);
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -79,6 +86,8 @@ export async function POST(req: Request) {
 
 // DELETE /api/worktrees  body: { cwd, path, force? }
 export async function DELETE(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
   try {
     const body = await req.json() as { cwd?: string; path?: string; force?: boolean };
     if (!body.cwd || typeof body.cwd !== "string") {
@@ -87,7 +96,7 @@ export async function DELETE(req: Request) {
     if (!body.path || typeof body.path !== "string") {
       return NextResponse.json({ error: "path is required" }, { status: 400 });
     }
-    const denied = await checkCwdAllowed(body.cwd);
+    const denied = await checkCwdAllowed(body.cwd, auth.user);
     if (denied) return denied;
 
     await removeWorktree(body.cwd, body.path, body.force === true);

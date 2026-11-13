@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../../__tests__/test-user.mjs";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const testAgentDir = await mkdtemp(join(tmpdir(), "pi-web-subagent-route-global-"));
@@ -16,8 +17,13 @@ const jiti = createJiti(import.meta.url, {
   moduleCache: false,
 });
 const { GET, PUT, PATCH, DELETE } = await jiti.import("./route.ts");
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
 const { parseFrontmatter } = await jiti.import("../../../../lib/frontmatter.ts");
+
+// Multi-user is the only mode: routes require a real account, and browsable
+// roots are registered per user.
+const { auth: testAuth, cleanup: cleanupTestUser, allowRoot } = await installTestUser();
+after(cleanupTestUser);
+const allowFileRoot = allowRoot;
 
 after(async () => {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -41,10 +47,15 @@ function profile(overrides = {}) {
   };
 }
 
+/** Headers for a bare GET: multi-user is the only mode, so every call authenticates. */
+function authHeaders(extra = {}) {
+  return { authorization: testAuth, Host: "localhost", ...extra };
+}
+
 function jsonRequest(method, body) {
   return new Request("http://localhost/api/subagents/profiles", {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { authorization: testAuth, "Content-Type": "application/json", Host: "localhost" },
     body: JSON.stringify(body),
   });
 }
@@ -106,7 +117,7 @@ test("profiles route creates, lists, and deletes a project profile", async (t) =
   assert.match(source, /load_skills: true/);
   assert.match(source, /load_extensions: true/);
 
-  const getResponse = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  const getResponse = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() }));
   const getBody = await getResponse.json();
   assert.equal(getResponse.status, 200);
   const listedProfile = getBody.profiles.find((item) => item.name === "api-test-agent");
@@ -118,7 +129,7 @@ test("profiles route creates, lists, and deletes a project profile", async (t) =
   assert.equal(deleteResponse.status, 200);
   assert.deepEqual(await deleteResponse.json(), { ok: true });
 
-  const afterDelete = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  const afterDelete = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() }));
   const afterDeleteBody = await afterDelete.json();
   assert.equal(afterDeleteBody.profiles.some((item) => item.name === "api-test-agent"), false);
 });
@@ -144,7 +155,7 @@ test("profiles route keeps same-name global and project profiles independently e
   }));
   assert.equal(response.status, 200);
 
-  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() }));
   const sources = (await response.json()).profiles
     .filter((item) => item.name === "api-test-agent")
     .sort((a, b) => a.scope.localeCompare(b.scope));
@@ -159,7 +170,7 @@ test("profiles route keeps same-name global and project profiles independently e
   }));
   assert.equal(response.status, 200);
   assert.equal((await response.json()).profile.enabled, false);
-  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() }));
   const toggledSources = (await response.json()).profiles.filter((item) => item.name === "api-test-agent");
   assert.equal(toggledSources.find((item) => item.scope === "global").enabled, false);
   assert.equal(toggledSources.find((item) => item.scope === "global").description, "Global profile");
@@ -169,7 +180,7 @@ test("profiles route keeps same-name global and project profiles independently e
 
   response = await DELETE(jsonRequest("DELETE", { cwd, scope: "project", name: "api-test-agent" }));
   assert.equal(response.status, 200);
-  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() }));
   assert.deepEqual(
     (await response.json()).profiles.filter((item) => item.name === "api-test-agent").map((item) => item.scope),
     ["global"],
@@ -199,7 +210,7 @@ test("profiles route toggles a built-in through settings.json without writing a 
   );
   assert.equal(existsSync(join(testAgentDir, "agents", "explore.md")), false);
 
-  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`));
+  response = await GET(new Request(`http://localhost/api/subagents/profiles?cwd=${encodeURIComponent(cwd)}`, { headers: authHeaders() }));
   const builtIns = (await response.json()).profiles.filter((item) => item.scope === "builtin");
   assert.equal(builtIns.find((item) => item.name === "explore").enabled, false);
   assert.equal(builtIns.filter((item) => item.enabled).length, builtIns.length - 1);
@@ -223,7 +234,7 @@ test("profiles route rejects missing paths, malformed profiles, and unsafe names
   allowFileRoot(cwd);
   t.after(() => rm(cwd, { recursive: true, force: true }));
 
-  let response = await GET(new Request("http://localhost/api/subagents/profiles"));
+  let response = await GET(new Request("http://localhost/api/subagents/profiles", { headers: authHeaders() }));
   assert.equal(response.status, 400);
 
   response = await PUT(jsonRequest("PUT", { cwd, scope: "project" }));

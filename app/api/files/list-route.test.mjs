@@ -3,9 +3,10 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { NextRequest } from "next/server.js";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-files-route-")));
 fs.writeFileSync(path.join(root, "gitconfig"), "");
@@ -22,8 +23,15 @@ const jiti = createJiti(import.meta.url, {
   moduleCache: false,
 });
 const { GET } = await jiti.import("./[...path]/route.ts");
-const { allowFileRoot } = await jiti.import("../../../lib/allowed-roots.ts");
-allowFileRoot(root);
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
+
+const { allowFileRootForUser } = await jiti.import("../../../lib/allowed-roots.ts");
+const { resolveAuthUser } = await jiti.import("../../../lib/user-auth.ts");
+const testUser = await resolveAuthUser(new Request("http://localhost/", { headers: { authorization: testAuth } }));
+allowFileRootForUser(testUser.userId, root);
 
 function write(filePath, content = "") {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -33,7 +41,7 @@ function write(filePath, content = "") {
 function request(filePath, type) {
   const segments = filePath.replace(/\\/g, "/").split("/").filter(Boolean);
   return GET(
-    new NextRequest(`http://localhost/api/files/x?type=${type}`),
+    new NextRequest(`http://localhost/api/files/x?type=${type}`, { headers: { authorization: testAuth } }),
     { params: Promise.resolve({ path: segments }) },
   );
 }

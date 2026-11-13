@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test, { after, beforeEach } from "node:test";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 // POST /api/mcp writes the user's files, so every case runs against a
 // PI_CODING_AGENT_DIR in a temporary folder, never the real ~/.pi/agent.
@@ -22,9 +23,13 @@ await mkdir(join(cwd, ".pi"), { recursive: true });
 await mkdir(outside, { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { POST } = await jiti.import("./route.ts");
-allowFileRoot(cwd);
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser, allowRoot } = await installTestUser();
+after(cleanupTestUser);
+
+allowRoot(cwd);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -60,7 +65,7 @@ beforeEach(async () => {
 async function post(body, headers = {}) {
   const response = await POST(new Request("http://localhost/api/mcp", {
     method: "POST",
-    headers: { host: "localhost", "Content-Type": "application/json", ...headers },
+    headers: { authorization: testAuth, host: "localhost", "Content-Type": "application/json", ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
   }));
   return { status: response.status, body: await response.json() };

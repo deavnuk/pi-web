@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../__tests__/test-user.mjs";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const testAgentDir = await mkdtemp(join(tmpdir(), "pi-web-models-config-route-"));
@@ -14,7 +15,12 @@ const jiti = createJiti(import.meta.url, {
   interopDefault: true,
   moduleCache: false,
 });
-const { GET, PUT } = await jiti.import("./route.ts");
+const { GET: rawGet, PUT } = await jiti.import("./route.ts");
+
+// Multi-user is the only mode: routes require a real account.
+const { auth: testAuth, cleanup: cleanupTestUser } = await installTestUser();
+after(cleanupTestUser);
+
 const modelsPath = join(testAgentDir, "models.json");
 
 after(async () => {
@@ -23,10 +29,17 @@ after(async () => {
   await rm(testAgentDir, { recursive: true, force: true });
 });
 
+/** GET needs the auth header now that multi-user is the only mode. */
+function GET() {
+  return rawGet(new Request("http://localhost/api/models-config", {
+    headers: { authorization: testAuth, Host: "localhost" },
+  }));
+}
+
 function put(body) {
   return new Request("http://localhost/api/models-config", {
     method: "PUT",
-    headers: { "Content-Type": "application/json", Host: "localhost" },
+    headers: { authorization: testAuth, "Content-Type": "application/json", Host: "localhost" },
     body: JSON.stringify(body),
   });
 }

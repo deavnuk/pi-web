@@ -3,8 +3,9 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createJiti } from "jiti";
+import { installTestUser } from "../../__tests__/test-user.mjs";
 
 const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-git-diff-route-")));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -26,8 +27,13 @@ const jiti = createJiti(import.meta.url, {
   alias: { "@": process.cwd() }, interopDefault: true, moduleCache: false,
 });
 const { GET } = await jiti.import("./route.ts");
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
 const { NextRequest } = await jiti.import("next/server");
+
+// Multi-user is the only mode: routes require a real account, and browsable
+// roots are registered per user.
+const { auth: testAuth, cleanup: cleanupTestUser, allowRoot } = await installTestUser();
+after(cleanupTestUser);
+const allowFileRoot = allowRoot;
 
 function git(cwd, ...args) {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -44,7 +50,7 @@ function request(cwd, filePath) {
   const url = new URL("http://localhost/api/git/diff");
   url.searchParams.set("cwd", cwd);
   url.searchParams.set("path", filePath);
-  return GET(new NextRequest(url));
+  return GET(new NextRequest(url, { headers: { authorization: testAuth } }));
 }
 
 function directoryLink(target, link) {

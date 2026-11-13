@@ -7,6 +7,7 @@ import test, { after, beforeEach } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ProjectTrustStore } from "@earendil-works/pi-coding-agent";
 import { createJiti } from "jiti";
+import { installTestUser } from "../../__tests__/test-user.mjs";
 
 // POST /api/mcp/test starts processes and reads mcp-auth.json, so every case
 // runs against a PI_CODING_AGENT_DIR in a temporary folder, never ~/.pi/agent.
@@ -23,11 +24,15 @@ await mkdir(join(cwd, ".pi"), { recursive: true });
 await mkdir(outside, { recursive: true });
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() } });
-const { allowFileRoot } = await jiti.import("../../../../lib/file-access.ts");
 const { clearMcpStatuses } = await jiti.import("../../../../lib/mcp-status.ts");
 const { POST } = await jiti.import("./route.ts");
 const { GET } = await jiti.import("../route.ts");
-allowFileRoot(cwd);
+
+// Multi-user is the only mode: routes require a real account, and browsable
+// roots are registered per user.
+const { auth: testAuth, cleanup: cleanupTestUser, allowRoot } = await installTestUser();
+after(cleanupTestUser);
+allowRoot(cwd);
 
 after(async () => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -40,8 +45,8 @@ after(async () => {
 const FIXTURE = fileURLToPath(new URL("../../../../lib/__fixtures__/mcp-env-server.mjs", import.meta.url));
 const globalPath = join(agentDir, "mcp.json");
 const projectPath = join(cwd, ".pi", "mcp.json");
-const marker = join(root, "command-ran");
-const envFile = join(root, "env-names.json");
+const marker = join(agentDir, "command-ran");
+const envFile = join(agentDir, "env-names.json");
 const store = new ProjectTrustStore(agentDir);
 const SECRET = "literal-header-secret-value";
 
@@ -66,14 +71,14 @@ beforeEach(async () => {
 async function post(body, headers = {}) {
   const response = await POST(new Request("http://localhost/api/mcp/test", {
     method: "POST",
-    headers: { host: "localhost", "Content-Type": "application/json", ...headers },
+    headers: { host: "localhost", authorization: testAuth, "Content-Type": "application/json", ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
   }));
   return { status: response.status, body: await response.json() };
 }
 
 async function get(query = "") {
-  const response = await GET(new Request(`http://localhost/api/mcp${query}`, { headers: { host: "localhost" } }));
+  const response = await GET(new Request(`http://localhost/api/mcp${query}`, { headers: { host: "localhost", authorization: testAuth } }));
   return (await response.json()).servers;
 }
 

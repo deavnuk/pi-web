@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { runNpx } from "@/lib/npx";
+import { requireAuth } from "@/lib/user-auth";
 import type { SkillSearchResult } from "@/lib/api-types";
 
 export const dynamic = "force-dynamic";
@@ -89,6 +90,9 @@ function parseInstallCount(installs: string): number {
 
 // POST /api/skills/search  body: { query: string, limit?: number }
 export async function POST(req: Request) {
+  const auth = await requireAuth(req);
+  if ("response" in auth) return auth.response;
+  const user = auth.user;
   try {
     const { query, limit: rawLimit } = await req.json() as { query?: string; limit?: unknown };
     if (!query?.trim()) return NextResponse.json({ error: "query required" }, { status: 400 });
@@ -101,6 +105,7 @@ export async function POST(req: Request) {
       const { stdout, stderr } = await runNpx(["skills", "find", query.trim()], {
         timeout: 20000,
         env: { ...process.env, FORCE_COLOR: "0" },
+        user,
       });
 
       const results = parseSearchOutput(stdout + stderr).slice(0, limit);

@@ -283,16 +283,41 @@ async function runPool<T>(items: T[], worker: (item: T) => Promise<void>) {
 	}
 }
 
-function getIndex(): Map<string, IndexEntry> {
-	if (!globalThis.__piWebScanIndex) globalThis.__piWebScanIndex = new Map();
-	return globalThis.__piWebScanIndex;
+function getIndex(agentDir?: string): Map<string, IndexEntry> {
+	if (!agentDir) {
+		if (!globalThis.__piWebScanIndex) globalThis.__piWebScanIndex = new Map();
+		return globalThis.__piWebScanIndex;
+	}
+	if (!globalThis.__piWebScanIndexByDir) globalThis.__piWebScanIndexByDir = new Map();
+	let index = globalThis.__piWebScanIndexByDir.get(agentDir);
+	if (!index) {
+		index = new Map();
+		globalThis.__piWebScanIndexByDir.set(agentDir, index);
+	}
+	return index as Map<string, IndexEntry>;
 }
 
 function indexFilePath(): string {
 	return join(getAgentDir(), "pi-web-session-index.json");
 }
 
-function loadPersistedIndex(): void {
+// Multi-user: the incremental index is per agent dir (each user has their own
+// session tree). The legacy global index stays the default (undefined key).
+declare global {
+	var __piWebScanIndexByDir: Map<string, Map<string, unknown>> | undefined;
+	var __piWebScanIndexLoadedByDir: Set<string> | undefined;
+}
+
+function loadPersistedIndex(agentDir?: string): void {
+	if (agentDir) {
+		if (!globalThis.__piWebScanIndexLoadedByDir) globalThis.__piWebScanIndexLoadedByDir = new Set();
+		if (globalThis.__piWebScanIndexLoadedByDir.has(agentDir)) return;
+		globalThis.__piWebScanIndexLoadedByDir.add(agentDir);
+		// Per-user indexes are in-memory only: user session trees are small and
+		// rebuilding from disk is cheap, while persisting would scatter state
+		// outside the user's own data root.
+		return;
+	}
 	if (globalThis.__piWebScanIndexLoaded) return;
 	globalThis.__piWebScanIndexLoaded = true;
 	const path = indexFilePath();
@@ -300,7 +325,7 @@ function loadPersistedIndex(): void {
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
 		if (!isRecord(parsed) || parsed.version !== INDEX_FORMAT_VERSION || !isRecord(parsed.entries)) return;
-		const index = getIndex();
+		const index = getIndex(agentDir);
 		for (const [pathKey, entry] of Object.entries(parsed.entries)) {
 			if (!isRecord(entry) || !isRecord(entry.fp) || !isRecord(entry.info)) continue;
 			const { fp, info } = entry;
@@ -363,15 +388,16 @@ function queueIndexPersist(): void {
  * catalogue (modified descending).
  */
 export async function listSessionsIncremental(
-	options: { deferDetails?: boolean } = {},
+	options: { deferDetails?: boolean; agentDir?: string } = {},
 ): Promise<ScannedSessionInfo[]> {
-	loadPersistedIndex();
+	const agentDir = options.agentDir;
+	loadPersistedIndex(agentDir);
 	const deferDetails = options.deferDetails ?? false;
 
-	const sessionsDir = join(getAgentDir(), "sessions");
+	const sessionsDir = join(agentDir || getAgentDir(), "sessions");
 	const files = await enumerateSessionFiles(sessionsDir);
 
-	const index = getIndex();
+	const index = getIndex(agentDir);
 	const present = new Set(files);
 	const stale: string[] = [];
 	for (const known of index.keys()) {
@@ -454,4 +480,6 @@ export function resetSessionScanIndexForTests(): void {
 	globalThis.__piWebScanIndex = undefined;
 	globalThis.__piWebScanIndexLoaded = undefined;
 	globalThis.__piWebScanIndexSaveQueued = undefined;
+	globalThis.__piWebScanIndexByDir = undefined;
+	globalThis.__piWebScanIndexLoadedByDir = undefined;
 }
